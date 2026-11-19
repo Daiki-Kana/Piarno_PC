@@ -250,18 +250,18 @@ const landmarkFilters = ALL_JOINT_INDICES.map(() => new PointFilter(1.6, 0.02));
 const filteredLandmarks = ALL_JOINT_INDICES.map(() => ({ x: 0, y: 0 }));
 
 // ==========================================================================
-// パー判定 ＆ マラカス振り（外方向への勢いある振り＋急減速/折り返し）検知
+// パー/グー判定 ＆ マラカス振り（縦：下方向への勢いある振り＋急減速/折り返し）検知
 // ==========================================================================
-const SHAKE_ARM_SPEED_TH = 2.6;     // 外方向への振り開始とみなす正規化速度（palmSize / 秒）
-const SHAKE_MIN_DECEL_TH = 14.0;    // 振り切り減速発火に必要な最小減速加速度（palmSize / 秒^2）
+const SHAKE_ARM_SPEED_TH = 2.4;     // 下方向への振り開始とみなす正規化速度（palmSize / 秒）
+const SHAKE_MIN_DECEL_TH = 12.0;    // 振り切り減速発火に必要な最小減速加速度（palmSize / 秒^2）
 const SHAKE_COOLDOWN_MS = 110;      // 連続誤爆を防ぐ最小発音間隔（ms）
 
 const maracasState = {
   prevCenter: null,
   prevTimeMs: null,
-  prevOutwardSpeed: 0,
+  prevDownSpeed: 0,
   isArmed: false,
-  peakOutwardSpeed: 0,
+  peakDownSpeed: 0,
   lastHitTimeMs: 0,
   ripples: []
 };
@@ -272,9 +272,9 @@ const maracasState = {
 function resetMaracasState() {
   maracasState.prevCenter = null;
   maracasState.prevTimeMs = null;
-  maracasState.prevOutwardSpeed = 0;
+  maracasState.prevDownSpeed = 0;
   maracasState.isArmed = false;
-  maracasState.peakOutwardSpeed = 0;
+  maracasState.peakDownSpeed = 0;
 }
 
 /**
@@ -332,39 +332,33 @@ function evaluateMaracasShake(lm, pxLm, nowMs) {
   }
 
   const dt = Math.max((nowMs - maracasState.prevTimeMs) / 1000, 1 / 240);
-  const vx = (centerNorm.x - maracasState.prevCenter.x) / (palmSize * dt);
-  const vy = (centerNorm.y - maracasState.prevCenter.y) / (palmSize * dt);
-
-  // 人差し指付け根(5)→小指付け根(17)の方向を「外方向」として正規化速度を射影
-  const outDx = lm[17].x - lm[5].x;
-  const outDy = lm[17].y - lm[5].y;
-  const outLen = Math.max(0.02, Math.hypot(outDx, outDy));
-  const outwardSpeed = vx * (outDx / outLen) + vy * (outDy / outLen);
+  // Y軸下方向（上から下への振り下ろし）の正規化速度を算出
+  const downSpeed = (centerNorm.y - maracasState.prevCenter.y) / (palmSize * dt);
 
   maracasState.prevCenter = centerNorm;
   maracasState.prevTimeMs = nowMs;
 
-  if (outwardSpeed >= SHAKE_ARM_SPEED_TH) {
+  if (downSpeed >= SHAKE_ARM_SPEED_TH) {
     maracasState.isArmed = true;
-    if (outwardSpeed > maracasState.peakOutwardSpeed) {
-      maracasState.peakOutwardSpeed = outwardSpeed;
+    if (downSpeed > maracasState.peakDownSpeed) {
+      maracasState.peakDownSpeed = downSpeed;
     }
   }
 
   let shook = false;
   if (maracasState.isArmed) {
-    // 外側へ勢い良く振り切った直後の折り返し（負転）または急減速で発音
-    const isReversal = outwardSpeed < 0;
-    const decel = (maracasState.prevOutwardSpeed - outwardSpeed) / dt;
+    // 縦に勢い良く振り下ろした直後の折り返し（上方向へ反転）または急減速で発音
+    const isReversal = downSpeed < 0;
+    const decel = (maracasState.prevDownSpeed - downSpeed) / dt;
     const isSharpStop =
-      outwardSpeed < maracasState.peakOutwardSpeed * 0.4 && decel >= SHAKE_MIN_DECEL_TH;
+      downSpeed < maracasState.peakDownSpeed * 0.4 && decel >= SHAKE_MIN_DECEL_TH;
 
     if ((isReversal || isSharpStop) && nowMs - maracasState.lastHitTimeMs >= SHAKE_COOLDOWN_MS) {
-      const intensity = Math.min(1.0, Math.max(0.35, (maracasState.peakOutwardSpeed - 2.0) / 5.5));
+      const intensity = Math.min(1.0, Math.max(0.35, (maracasState.peakDownSpeed - 1.8) / 5.5));
       playMaracasSound(intensity, isOpen);
       maracasState.lastHitTimeMs = nowMs;
       maracasState.isArmed = false;
-      maracasState.peakOutwardSpeed = 0;
+      maracasState.peakDownSpeed = 0;
       shook = true;
 
       // 波紋ビジュアルエフェクトを追加
@@ -378,7 +372,7 @@ function evaluateMaracasShake(lm, pxLm, nowMs) {
     }
   }
 
-  maracasState.prevOutwardSpeed = outwardSpeed;
+  maracasState.prevDownSpeed = downSpeed;
 
   if (telemetryMode) {
     telemetryMode.textContent = shook ? "SHAKE" : isOpen ? "OPEN" : "CLOSED";
