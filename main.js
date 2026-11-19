@@ -254,7 +254,7 @@ const filteredLandmarks = ALL_JOINT_INDICES.map(() => ({ x: 0, y: 0 }));
 // ==========================================================================
 const SHAKE_ARM_SPEED_TH = 2.4;     // 下方向への振り開始とみなす正規化速度（palmSize / 秒）
 const SHAKE_MIN_DECEL_TH = 12.0;    // 振り切り減速発火に必要な最小減速加速度（palmSize / 秒^2）
-const SHAKE_COOLDOWN_MS = 110;      // 連続誤爆を防ぐ最小発音間隔（ms）
+const SHAKE_COOLDOWN_MS = 200;      // 連続誤爆を防ぐ無検知時間（ms）
 
 const maracasState = {
   prevCenter: null,
@@ -338,7 +338,8 @@ function evaluateMaracasShake(lm, pxLm, nowMs) {
   maracasState.prevCenter = centerNorm;
   maracasState.prevTimeMs = nowMs;
 
-  if (downSpeed >= SHAKE_ARM_SPEED_TH) {
+  const isInCooldown = nowMs - maracasState.lastHitTimeMs < SHAKE_COOLDOWN_MS;
+  if (!isInCooldown && downSpeed >= SHAKE_ARM_SPEED_TH) {
     maracasState.isArmed = true;
     if (downSpeed > maracasState.peakDownSpeed) {
       maracasState.peakDownSpeed = downSpeed;
