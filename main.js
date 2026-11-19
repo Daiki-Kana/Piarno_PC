@@ -171,13 +171,17 @@ function playMaracasSound(intensity = 0.7, isOpen = true) {
 // ==========================================================================
 // パー/グー判定 ＆ マラカス振り（縦：下方向への振り始め立ち上がり即時発音）検知
 // ==========================================================================
-const SHAKE_TRIGGER_SPEED_TH = 2.6; // 即時発音とみなす下方向正規化速度（palmSize / 秒）
-const SHAKE_RESET_SPEED_TH = 0.8;   // 再トリガー許可のための速度低下閾値（palmSize / 秒）
-const SHAKE_COOLDOWN_MS = 200;      // 連続誤爆を防ぐ無検知時間（ms）
+const SHAKE_TRIGGER_SPEED_TH = 2.6;     // 即時発音とみなす下方向正規化速度（palmSize / 秒）
+const SHAKE_RESET_SPEED_TH = 0.8;       // 再トリガー許可のための速度低下閾値（palmSize / 秒）
+const SHAKE_MIN_STROKE_DIST = 0.12;     // 誤爆防止の最小下移動距離（palmSize比）
+const SHAKE_MIN_PALM_SCALE_RATIO = 0.97;// カメラから遠ざかる後ろ引きを弾くサイズ維持率
+const SHAKE_COOLDOWN_MS = 200;          // 連続誤爆を防ぐ無検知時間（ms）
 
 const maracasState = {
   prevCenter: null,
   prevTimeMs: null,
+  prevPalmSize: null,
+  downStrokeDist: 0,
   canTrigger: true,
   lastHitTimeMs: 0,
   ripples: []
@@ -189,6 +193,8 @@ const maracasState = {
 function resetMaracasState() {
   maracasState.prevCenter = null;
   maracasState.prevTimeMs = null;
+  maracasState.prevPalmSize = null;
+  maracasState.downStrokeDist = 0;
   maracasState.canTrigger = true;
 }
 
@@ -242,16 +248,31 @@ function evaluateMaracasShake(lm, pxLm, nowMs) {
   if (maracasState.prevCenter === null || maracasState.prevTimeMs === null) {
     maracasState.prevCenter = centerNorm;
     maracasState.prevTimeMs = nowMs;
+    maracasState.prevPalmSize = palmSize;
     if (telemetryMode) telemetryMode.textContent = isOpen ? "OPEN" : "CLOSED";
     return { isOpen, shook: false, centerPx };
   }
 
   const dt = Math.max((nowMs - maracasState.prevTimeMs) / 1000, 1 / 240);
+  const deltaDownNorm = (centerNorm.y - maracasState.prevCenter.y) / palmSize;
   // Y軸下方向（上から下への振り下ろし）の正規化速度を算出
-  const downSpeed = (centerNorm.y - maracasState.prevCenter.y) / (palmSize * dt);
+  const downSpeed = deltaDownNorm / dt;
+
+  // 下向きに連続移動した距離を累積し、上向きに戻ったらリセット
+  if (deltaDownNorm > 0) {
+    maracasState.downStrokeDist += deltaDownNorm;
+  } else {
+    maracasState.downStrokeDist = 0;
+  }
+
+  // カメラから遠ざかる後ろ引き（手の見かけサイズ縮小）をブロック
+  const isNotRetreating =
+    maracasState.prevPalmSize === null ||
+    palmSize >= maracasState.prevPalmSize * SHAKE_MIN_PALM_SCALE_RATIO;
 
   maracasState.prevCenter = centerNorm;
   maracasState.prevTimeMs = nowMs;
+  maracasState.prevPalmSize = palmSize;
 
   if (!maracasState.canTrigger && downSpeed < SHAKE_RESET_SPEED_TH) {
     maracasState.canTrigger = true;
@@ -259,11 +280,18 @@ function evaluateMaracasShake(lm, pxLm, nowMs) {
 
   let shook = false;
   const isInCooldown = nowMs - maracasState.lastHitTimeMs < SHAKE_COOLDOWN_MS;
-  // 振り始めの加速立ち上がりで即座に発音し、振り終わり待ち遅延をゼロにする
-  if (maracasState.canTrigger && !isInCooldown && downSpeed >= SHAKE_TRIGGER_SPEED_TH) {
+  // 振り始めの加速立ち上がり（サイズ維持＋最小ストローク長達成時）で即座に発音
+  if (
+    maracasState.canTrigger &&
+    !isInCooldown &&
+    isNotRetreating &&
+    maracasState.downStrokeDist >= SHAKE_MIN_STROKE_DIST &&
+    downSpeed >= SHAKE_TRIGGER_SPEED_TH
+  ) {
     const intensity = Math.min(1.0, Math.max(0.35, (downSpeed - 2.0) / 5.5));
     playMaracasSound(intensity, isOpen);
     maracasState.canTrigger = false;
+    maracasState.downStrokeDist = 0;
     maracasState.lastHitTimeMs = nowMs;
     shook = true;
 
