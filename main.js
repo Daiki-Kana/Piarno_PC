@@ -7,6 +7,7 @@
  */
 
 import { FilesetResolver, HandLandmarker } from "@mediapipe/tasks-vision";
+import { createHandpose } from "@svenflow/micro-handpose";
 import * as Tone from "tone";
 import { BlanchDetector } from "./blanchDetector.js";
 
@@ -35,10 +36,12 @@ const telemetryAppFps = document.getElementById("telemetry-app-fps");
 const telemetryRes = document.getElementById("telemetry-res");
 const telemetryMs = document.getElementById("telemetry-ms");
 const telemetryMode = document.getElementById("telemetry-mode");
+const telemetryEngine = document.getElementById("telemetry-engine");
 const cameraSelectBtn = document.getElementById("camera-select-btn");
 const cameraSelectMenu = document.getElementById("camera-select-menu");
 const cameraListEl = document.getElementById("camera-list");
 const mirrorToggleBtn = document.getElementById("mirror-toggle-btn");
+const oneEuroToggleBtn = document.getElementById("one-euro-toggle-btn");
 const tipXVal = document.getElementById("tip-x-val");
 const tipYVal = document.getElementById("tip-y-val");
 const relYVal = document.getElementById("rel-y-val");
@@ -107,6 +110,7 @@ const FREE_SESSION_LEGATO_VY_MULTIPLIER = 1.3; // 他指が机についている
 
 const PC_CAMERA_STORAGE_KEY = "piarno_pc_camera_id";
 const PC_MIRROR_STORAGE_KEY = "piarno_pc_mirror";
+const PC_ONE_EURO_STORAGE_KEY = "piarno_pc_one_euro";
 
 let currentCameraId = (() => {
   try {
@@ -119,6 +123,15 @@ let currentCameraId = (() => {
 let isMirrorEnabled = (() => {
   try {
     const saved = localStorage.getItem(PC_MIRROR_STORAGE_KEY);
+    return saved === null ? true : saved === "true";
+  } catch {
+    return true;
+  }
+})();
+
+let isOneEuroEnabled = (() => {
+  try {
+    const saved = localStorage.getItem(PC_ONE_EURO_STORAGE_KEY);
     return saved === null ? true : saved === "true";
   } catch {
     return true;
@@ -542,6 +555,39 @@ export function playTapSound(targetFreqOrNote = 523.25, countAsTap = true, optio
 
 // 状態管理
 let handLandmarker = null;
+let microHandpose = null;
+let microInputCanvas = null;
+let microInputCtx = null;
+let activeTrackingEngine = "NONE"; // "MICRO_HANDPOSE" | "MEDIAPIPE"
+let isInferringFrame = false;
+let pendingVideoFrameTime = null;
+
+/**
+ * MicroPose 用の中間入力 Canvas を確保・同期する（毎フレームの createImageBitmap オーバーヘッド回避）
+ * アスペクト比を維持したまま長辺最大640pxに収めることでGPUテクスチャ転送負荷も最小化
+ * @param {number} vw
+ * @param {number} vh
+ * @returns {HTMLCanvasElement}
+ */
+function ensureMicroInputCanvas(vw, vh) {
+  const maxDim = 640;
+  let targetW = vw || 640;
+  let targetH = vh || 360;
+  if (Math.max(targetW, targetH) > maxDim) {
+    const scale = maxDim / Math.max(targetW, targetH);
+    targetW = Math.round(targetW * scale);
+    targetH = Math.round(targetH * scale);
+  }
+  if (!microInputCanvas) {
+    microInputCanvas = document.createElement("canvas");
+    microInputCtx = microInputCanvas.getContext("2d", { alpha: false });
+  }
+  if (microInputCanvas.width !== targetW || microInputCanvas.height !== targetH) {
+    microInputCanvas.width = targetW;
+    microInputCanvas.height = targetH;
+  }
+  return microInputCanvas;
+}
 let currentStream = null;
 let isPredicting = false;
 // 上限FPS（カメラ・アプリともに60fpsを上限に固定。50/60fpsジッターによる半減を防ぐため10ms未満の過剰到着のみ間引き）
@@ -623,11 +669,18 @@ class PointFilter {
   constructor(minCutoff = 1.2, beta = 0.008) {
     this.xf = new OneEuroFilter(minCutoff, beta);
     this.yf = new OneEuroFilter(minCutoff, beta);
+    this.rawYPrev = null;
+    this.rawTimePrev = null;
+    this.rawVy = 0;
+    this.isBypassed = false;
   }
 
   reset(x = null, y = null, timestamp = null) {
     this.xf.reset(x, timestamp);
     this.yf.reset(y, timestamp);
+    this.rawYPrev = y;
+    this.rawTimePrev = timestamp;
+    this.rawVy = 0;
   }
 
   /**
@@ -650,27 +703,39 @@ class PointFilter {
     };
   }
 
-  filter(x, y, timestamp, out = null) {
+  filter(x, y, timestamp, out = null, bypass = false) {
+    // 再ON時の座標飛びを防ぐため内部フィルタ状態も常に追従させる
     const fx = this.xf.filter(x, timestamp);
     const fy = this.yf.filter(y, timestamp);
+
+    if (this.rawYPrev !== null && this.rawTimePrev !== null) {
+      const dt = Math.max((timestamp - this.rawTimePrev) / 1000, 1 / 240);
+      this.rawVy = (y - this.rawYPrev) / dt;
+    }
+    this.rawYPrev = y;
+    this.rawTimePrev = timestamp;
+    this.isBypassed = bypass;
+
+    const outX = bypass ? x : fx;
+    const outY = bypass ? y : fy;
     if (out) {
-      out.x = fx;
-      out.y = fy;
+      out.x = outX;
+      out.y = outY;
       return out;
     }
     return {
-      x: fx,
-      y: fy
+      x: outX,
+      y: outY
     };
   }
 
   /**
-   * 平滑化されたY軸下降速度（ピクセル/秒）を取得
+   * Y軸下降速度（ピクセル/秒）を取得（バイパス時は生座標差分から算出）
    * 下向き移動時は正の値（> 0）、上向き移動時は負の値（< 0）
    * @returns {number}
    */
   getVelocityY() {
-    return this.yf.dxPrev;
+    return this.isBypassed ? this.rawVy : this.yf.dxPrev;
   }
 }
 
@@ -1106,7 +1171,7 @@ const smoothedLandmarksPool = Array.from({ length: 21 }, () => ({ x: 0, y: 0 }))
 
 // 一時的な検出ロスト対策（打鍵時の陰影による瞬断で骨格が点滅・ジャンプするのを防止しつつ、退出時は約0.1秒で即消去）
 let lostFrames = 0;
-const MAX_LOST_FRAMES = 6;
+const MAX_LOST_FRAMES = 0; // カクつき防止のため静止補間を無効化し生追従を優先
 let hasValidSmoothedLandmarks = false;
 let lastRawLandmarks = null;
 
@@ -1465,11 +1530,25 @@ function resizeNotesCanvas() {
 }
 window.addEventListener("resize", resizeNotesCanvas);
 
+let notesCanvasClearedInFreeMode = false;
+
 /**
  * 毎フレームのノーツ描画とアニメーション更新（画面上部から指先への落下）
  */
 function updateAndRenderNotes() {
   if (!notesCanvas || !notesCtx) return;
+
+  // フリーセッション中（パーティクル非表示時）は全画面再描画とDOM座標取得をスキップして負荷を削減
+  if (IS_FREE_SESSION && noteHitParticles.length === 0) {
+    if (!notesCanvasClearedInFreeMode) {
+      resizeNotesCanvas();
+      notesCtx.clearRect(0, 0, window.innerWidth, window.innerHeight);
+      notesCanvasClearedInFreeMode = true;
+    }
+    return;
+  }
+  notesCanvasClearedInFreeMode = false;
+
   resizeNotesCanvas();
 
   const w = window.innerWidth;
@@ -2093,9 +2172,45 @@ async function handleStartPlay() {
 }
 
 /**
- * MediaPipe Hand Landmarker の初期化
+ * ハンドトラッキングエンジンの初期化
+ * WebGPU対応環境では高速な @svenflow/micro-handpose を優先し、非対応時は MediaPipe へフォールバック
  */
 async function initHandLandmarker() {
+  // 1. MicroPose (WebGPU) の初期化を試行
+  if (typeof navigator !== "undefined" && navigator.gpu) {
+    try {
+      const adapter = await navigator.gpu.requestAdapter();
+      const adapterArch = adapter?.info?.architecture || "";
+      const isSoftwareWebGpu =
+        !adapter ||
+        adapter.isFallbackAdapter === true ||
+        adapterArch.toLowerCase().includes("swiftshader");
+
+      if (!isSoftwareWebGpu) {
+        microHandpose = await createHandpose({
+          maxHands: 1,
+          scoreThreshold: 0.4,
+          palmScoreThreshold: 0.4
+        });
+        activeTrackingEngine = "MICRO_HANDPOSE";
+        if (telemetryEngine) telemetryEngine.textContent = "MICRO";
+        console.log("[TRACKING ENGINE] MicroPose (WebGPU) を有効化しました", adapter.info);
+        return;
+      } else {
+        console.warn(
+          "[TRACKING ENGINE] WebGPU 実GPUアダプタが利用不可（ソフトウェアエミュレーション等）のため、MediaPipe へフォールバックします",
+          adapter?.info
+        );
+      }
+    } catch (microErr) {
+      console.warn("[TRACKING ENGINE] MicroPose (WebGPU) 初期化失敗、MediaPipe へフォールバック:", microErr);
+      microHandpose = null;
+    }
+  } else {
+    console.warn("[TRACKING ENGINE] WebGPU 非対応のため MediaPipe へフォールバックします");
+  }
+
+  // 2. MediaPipe Hand Landmarker フォールバック
   const vision = await FilesetResolver.forVisionTasks(
     "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
   );
@@ -2110,8 +2225,6 @@ async function initHandLandmarker() {
 
   for (const modelPath of modelPaths) {
     try {
-      // 画面内に左手が存在していても右手を見落とさず確実に追従・ロックするため両手（最大2手）検出を有効化
-      // 水平ローアングルでの打鍵時（机面接触・影）の再検出ループを防ぐため追従閾値を適正化
       handLandmarker = await HandLandmarker.createFromOptions(vision, {
         baseOptions: {
           modelAssetPath: modelPath,
@@ -2124,6 +2237,9 @@ async function initHandLandmarker() {
         minTrackingConfidence: 0.3
       });
       loaded = true;
+      activeTrackingEngine = "MEDIAPIPE";
+      if (telemetryEngine) telemetryEngine.textContent = "MP-GPU";
+      console.log("[TRACKING ENGINE] MediaPipe (GPU) を有効化しました");
       break;
     } catch (gpuErr) {
       console.warn("GPU失敗、CPUへフォールバック:", gpuErr);
@@ -2140,6 +2256,9 @@ async function initHandLandmarker() {
           minTrackingConfidence: 0.3
         });
         loaded = true;
+        activeTrackingEngine = "MEDIAPIPE";
+        if (telemetryEngine) telemetryEngine.textContent = "MP-CPU";
+        console.log("[TRACKING ENGINE] MediaPipe (CPU) を有効化しました");
         break;
       } catch (err) {
         lastErr = err;
@@ -2227,7 +2346,7 @@ async function refreshCameraList() {
         e.stopPropagation();
         if (cameraSelectMenu) cameraSelectMenu.classList.add("hidden");
         if (device.deviceId && device.deviceId !== currentCameraId) {
-          await startCamera(device.deviceId);
+          await startCamera(device.deviceId, true);
         }
       });
       cameraListEl.appendChild(btn);
@@ -2240,8 +2359,9 @@ async function refreshCameraList() {
 /**
  * PC向け 60fps Webカメラの起動・切り替え
  * @param {string | null} [deviceId=null]
+ * @param {boolean} [isManualSelect=false] ユーザーがUIから手動選択したかどうか
  */
-async function startCamera(deviceId = null) {
+async function startCamera(deviceId = null, isManualSelect = false) {
   // 既存ストリームがある場合は停止してから切り替え
   isPredicting = false;
   if (currentStream) {
@@ -2249,16 +2369,34 @@ async function startCamera(deviceId = null) {
     currentStream = null;
   }
 
+  const isBuiltInCameraLabel = (label = "") =>
+    /integrated|built-in|facetime|internal/i.test(label);
+
+  // 自動起動時は保存IDが内蔵30fpsカメラであっても外付け60fpsカメラを優先探索
+  let preferredDeviceId = deviceId;
+  if (!isManualSelect && navigator.mediaDevices?.enumerateDevices) {
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const videoInputs = devices.filter((d) => d.kind === "videoinput" && d.deviceId);
+      const savedDev = preferredDeviceId ? videoInputs.find((d) => d.deviceId === preferredDeviceId) : null;
+      const externalCam = videoInputs.find((d) => d.label && !isBuiltInCameraLabel(d.label));
+      if (externalCam && (!savedDev || isBuiltInCameraLabel(savedDev.label))) {
+        preferredDeviceId = externalCam.deviceId;
+        console.log(`[CAM AUTO] 外付けカメラを優先選択: ${externalCam.label}`);
+      }
+    } catch {}
+  }
+
   const buildConstraints = (targetDeviceId) => {
     const base = targetDeviceId ? { deviceId: { exact: targetDeviceId } } : {};
     return [
-      // APP 60fps 安定化のため 640x480 @ 60fps を最優先で要求
-      { video: { ...base, width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 60, max: 60, min: 30 } }, audio: false },
-      { video: { ...base, width: { ideal: 960 }, height: { ideal: 540 }, frameRate: { ideal: 60, max: 60, min: 30 } }, audio: false },
+      // 60fps 対応かつ転送・推論が最軽量な 1024x576 @ 60fps を最優先で要求
+      { video: { ...base, width: { exact: 1024 }, height: { exact: 576 }, frameRate: { ideal: 60, max: 60, min: 50 } }, audio: false },
+      { video: { ...base, width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 60, max: 60, min: 50 } }, audio: false },
+      { video: { ...base, width: { ideal: 1024 }, height: { ideal: 576 }, frameRate: { ideal: 60, max: 60, min: 30 } }, audio: false },
       { video: { ...base, width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 60, max: 60, min: 30 } }, audio: false },
-      { video: { ...base, width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 60, max: 60 } }, audio: false },
-      { video: { ...base, width: { ideal: 640 }, height: { ideal: 480 } }, audio: false },
       { video: { ...base, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false },
+      { video: { ...base, width: { ideal: 640 }, height: { ideal: 480 } }, audio: false },
       { video: targetDeviceId ? { deviceId: { exact: targetDeviceId } } : true, audio: false }
     ];
   };
@@ -2266,8 +2404,8 @@ async function startCamera(deviceId = null) {
   let stream = null;
   let lastError = null;
 
-  const tryList = deviceId
-    ? [...buildConstraints(deviceId), ...buildConstraints(null)]
+  const tryList = preferredDeviceId
+    ? [...buildConstraints(preferredDeviceId), ...buildConstraints(null)]
     : buildConstraints(null);
 
   for (const constraints of tryList) {
@@ -2289,6 +2427,22 @@ async function startCamera(deviceId = null) {
 
   if (!stream) {
     throw lastError || new Error("Webカメラの取得に失敗しました。接続とアクセス許可を確認してください。");
+  }
+
+  // 自動起動時に内蔵30fpsカメラを掴んだ場合、外付けカメラが存在すれば自動切替
+  const initialTrack = stream.getVideoTracks()[0];
+  if (!isManualSelect && initialTrack && isBuiltInCameraLabel(initialTrack.label) && navigator.mediaDevices?.enumerateDevices) {
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const externalCam = devices.find(
+        (d) => d.kind === "videoinput" && d.deviceId && d.label && !isBuiltInCameraLabel(d.label)
+      );
+      if (externalCam) {
+        console.log(`[CAM AUTO] 内蔵カメラから外付けカメラへ自動切替: ${externalCam.label}`);
+        stream.getTracks().forEach((t) => t.stop());
+        return startCamera(externalCam.deviceId, true);
+      }
+    } catch {}
   }
 
   currentStream = stream;
@@ -2343,13 +2497,18 @@ async function startCamera(deviceId = null) {
   updateCanvasResolution();
   await refreshCameraList();
 
-  // カメラ起動・切替時にFPS計測状態をリセット
+  // カメラ起動・切替時にFPS計測状態とMicroPose ROI状態をリセット
   frameCount = 0;
   cameraFrameCount = 0;
   lastPresentedFrames = -1;
   lastAppProcessedTime = 0;
+  isInferringFrame = false;
+  pendingVideoFrameTime = null;
   lastFpsUpdateTime = performance.now();
   lastCameraFpsUpdateTime = performance.now();
+  if (microHandpose && typeof microHandpose.reset === "function") {
+    microHandpose.reset();
+  }
 
   isPredicting = true;
   schedulePredictLoop();
@@ -2376,40 +2535,88 @@ function updateCanvasResolution() {
 let lastVideoTimestamp = -1;
 
 /**
- * 毎フレームの推論処理（単一フレーム）
+ * 毎フレームの推論処理（単一フレーム・非同期ガード付き）
  * @param {number} frameTime
  */
-function processVideoFrame(frameTime) {
-  if (!isPredicting) return;
+async function processVideoFrame(frameTime) {
+  if (!isPredicting || isInferringFrame) return;
+  isInferringFrame = true;
 
-  // カメラ解像度とCanvas解像度の完全一致を常時保証（iPadの向き変更・比率変更時の座標ズレ防止）
-  if (video.videoWidth && (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight)) {
-    updateCanvasResolution();
+  try {
+    // カメラ解像度とCanvas解像度の完全一致を常時保証
+    if (video.videoWidth && (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight)) {
+      updateCanvasResolution();
+    }
+
+    // 正確なフレーム時間をミリ秒で算出（MediaPipe VIDEOモードが要求する厳密な単調増加を保証）
+    const now = typeof frameTime === "number" ? frameTime : performance.now();
+    const timestampMs = Math.max(now, lastVideoTimestamp + 1.0);
+    lastVideoTimestamp = timestampMs;
+
+    const startTime = performance.now();
+    let results = { landmarks: [], handednesses: [] };
+
+    if (activeTrackingEngine === "MICRO_HANDPOSE" && microHandpose) {
+      // 本家デモ同様に中間Canvas経由で入力し、毎フレームの createImageBitmap() 負荷を回避
+      const inputCanvas = ensureMicroInputCanvas(video.videoWidth, video.videoHeight);
+      microInputCtx.drawImage(video, 0, 0, inputCanvas.width, inputCanvas.height);
+      const hands = await microHandpose.detect(inputCanvas);
+      if (!isPredicting) return;
+      results = {
+        landmarks: hands.map((h) => h.landmarks),
+        handednesses: hands.map((h) => [
+          {
+            categoryName: h.handedness === "right" ? "Right" : "Left",
+            score: h.score
+          }
+        ])
+      };
+    } else if (handLandmarker) {
+      results = handLandmarker.detectForVideo(video, timestampMs);
+    }
+
+    const calcDuration = performance.now() - startTime;
+    if (telemetryMs) {
+      telemetryMs.textContent = `${calcDuration.toFixed(1)} ms`;
+    }
+    if (isDebugPanelVisible) {
+      inferenceTime.textContent = `${calcDuration.toFixed(1)} ms`;
+    }
+
+    // 生ランドマーク座標の直接描画・打鍵判定
+    drawRawHandLandmarks(results);
+
+    // FPS更新
+    updateFps();
+  } catch (err) {
+    console.warn("[INFERENCE] フレーム推論エラー:", err);
+  } finally {
+    isInferringFrame = false;
+    // 推論中に到着していた最新フレームがあれば、次コールバックを待たずに即座に処理して30fps半減を防止
+    if (isPredicting && pendingVideoFrameTime !== null) {
+      const nextFrameTime = pendingVideoFrameTime;
+      pendingVideoFrameTime = null;
+      const nowMs = performance.now();
+      if (shouldRunAppFrame(nowMs)) {
+        processVideoFrame(nextFrameTime);
+      }
+    }
   }
+}
 
-  // 正確なフレーム時間をミリ秒で算出（MediaPipe VIDEOモードが要求する厳密な単調増加を保証）
-  const now = typeof frameTime === "number" ? frameTime : performance.now();
-  const timestampMs = Math.max(now, lastVideoTimestamp + 1.0);
-  lastVideoTimestamp = timestampMs;
-
-  const startTime = performance.now();
-
-  // VIDEOモードでの同期推論（正確なタイムスタンプにより内部トラッキング予測器が安定化）
-  const results = handLandmarker.detectForVideo(video, timestampMs);
-
-  const calcDuration = performance.now() - startTime;
-  if (telemetryMs) {
-    telemetryMs.textContent = `${calcDuration.toFixed(1)} ms`;
+/**
+ * 新規カメラフレームの推論ディスパッチ（推論中は最新フレームを保留）
+ * @param {number} frameTime
+ */
+function dispatchVideoFrame(frameTime) {
+  if (isInferringFrame) {
+    pendingVideoFrameTime = frameTime;
+    return;
   }
-  if (isDebugPanelVisible) {
-    inferenceTime.textContent = `${calcDuration.toFixed(1)} ms`;
+  const nowMs = performance.now();
+  if (shouldRunAppFrame(nowMs)) {
+    processVideoFrame(frameTime);
   }
-
-  // 生ランドマーク座標の直接描画
-  drawRawHandLandmarks(results);
-
-  // FPS更新
-  updateFps();
 }
 
 /**
@@ -2439,13 +2646,11 @@ function schedulePredictLoop() {
       schedulePredictLoop();
       const nowMs = performance.now();
       updateCameraFps(nowMs, metadata?.presentedFrames);
-      if (shouldRunAppFrame(nowMs)) {
-        const frameTime =
-          metadata && typeof metadata.presentationTime === "number"
-            ? metadata.presentationTime
-            : now;
-        processVideoFrame(frameTime);
-      }
+      const frameTime =
+        metadata && typeof metadata.presentationTime === "number"
+          ? metadata.presentationTime
+          : now;
+      dispatchVideoFrame(frameTime);
     });
   } else {
     requestAnimationFrame((now) => {
@@ -2455,9 +2660,7 @@ function schedulePredictLoop() {
         lastVideoTime = video.currentTime;
         const nowMs = performance.now();
         updateCameraFps(nowMs);
-        if (shouldRunAppFrame(nowMs)) {
-          processVideoFrame(now);
-        }
+        dispatchVideoFrame(now);
       }
     });
   }
@@ -2691,10 +2894,10 @@ function drawRawHandLandmarks(results) {
       }
       lastFilteredFingerKey = currentFingerKey;
     } else {
-      // 通常トラッキング時：適応平滑化（1 Euro Filter）
+      // 通常トラッキング時：適応平滑化（1 Euro Filter / トグルOFF時は生座標バイパス）
       for (const i of activeJointIndices) {
         const raw = landmarks[i];
-        landmarkFilters[i].filter(raw.x * width, raw.y * height, now, smoothedLandmarksPool[i]);
+        landmarkFilters[i].filter(raw.x * width, raw.y * height, now, smoothedLandmarksPool[i], !isOneEuroEnabled);
       }
     }
     hasValidSmoothedLandmarks = true;
@@ -3017,39 +3220,22 @@ function drawFingerTrackingOverlay(smoothP1, smoothP2, smoothP3, smoothTip, targ
     canvasCtx.lineTo(smoothTip.x, smoothTip.y);
   };
 
-  // 層1: 外側発光ハローライン
-  canvasCtx.strokeStyle = targetColor.halo || "rgba(0, 229, 255, 0.25)";
-  canvasCtx.lineWidth = 12.0;
-  drawBonePath();
-  canvasCtx.stroke();
-
-  // 層2: 中間メインネオンライン
+  // 軽量2層ライン描画（描画負荷を抑えつつ視認性を維持）
   canvasCtx.strokeStyle = targetColor.stroke;
-  canvasCtx.lineWidth = 6.0;
+  canvasCtx.lineWidth = 4.5;
   drawBonePath();
   canvasCtx.stroke();
 
-  // 層3: 内側高輝度ホワイトコアライン
-  canvasCtx.strokeStyle = "rgba(255, 255, 255, 0.95)";
-  canvasCtx.lineWidth = 2.4;
+  canvasCtx.strokeStyle = "rgba(255, 255, 255, 0.9)";
+  canvasCtx.lineWidth = 1.8;
   drawBonePath();
   canvasCtx.stroke();
 
-  // 関節点（P1, P2, P3）の多層描画
+  // 関節点（P1, P2, P3）の軽量ドット描画
+  canvasCtx.fillStyle = targetColor.fill;
   [smoothP1, smoothP2, smoothP3].forEach((pt) => {
     canvasCtx.beginPath();
-    canvasCtx.arc(pt.x, pt.y, 8.0, 0, 2 * Math.PI);
-    canvasCtx.fillStyle = targetColor.halo || "rgba(0, 229, 255, 0.25)";
-    canvasCtx.fill();
-
-    canvasCtx.beginPath();
-    canvasCtx.arc(pt.x, pt.y, 5.0, 0, 2 * Math.PI);
-    canvasCtx.fillStyle = targetColor.fill;
-    canvasCtx.fill();
-
-    canvasCtx.beginPath();
-    canvasCtx.arc(pt.x, pt.y, 2.4, 0, 2 * Math.PI);
-    canvasCtx.fillStyle = "#ffffff";
+    canvasCtx.arc(pt.x, pt.y, 4.0, 0, 2 * Math.PI);
     canvasCtx.fill();
   });
 
@@ -3326,6 +3512,26 @@ if (mirrorToggleBtn) {
       localStorage.setItem(PC_MIRROR_STORAGE_KEY, String(isMirrorEnabled));
     } catch {}
     applyMirrorUI();
+  });
+}
+
+function syncOneEuroToggleUI() {
+  if (!oneEuroToggleBtn) return;
+  oneEuroToggleBtn.classList.toggle("off", !isOneEuroEnabled);
+  oneEuroToggleBtn.setAttribute("aria-pressed", String(isOneEuroEnabled));
+  oneEuroToggleBtn.title = isOneEuroEnabled ? "1 Euro Filter: ON" : "1 Euro Filter: OFF";
+}
+
+if (oneEuroToggleBtn) {
+  syncOneEuroToggleUI();
+  oneEuroToggleBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    isOneEuroEnabled = !isOneEuroEnabled;
+    try {
+      localStorage.setItem(PC_ONE_EURO_STORAGE_KEY, String(isOneEuroEnabled));
+    } catch {}
+    syncOneEuroToggleUI();
+    console.log(`[1 EURO FILTER] ${isOneEuroEnabled ? "ON（平滑化有効）" : "OFF（生座標バイパス）"}`);
   });
 }
 

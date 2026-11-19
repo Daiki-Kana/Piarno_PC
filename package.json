@@ -5,15 +5,17 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:chrome": "(sleep 1 && google-chrome --user-data-dir=/tmp/piarno-chrome-webgpu --enable-unsafe-webgpu --enable-features=Vulkan --use-gl=angle --use-angle=gl http://localhost:5173 >/dev/null 2>&1 &) && vite",
+    "chrome": "google-chrome --user-data-dir=/tmp/piarno-chrome-webgpu --enable-unsafe-webgpu --enable-features=Vulkan --use-gl=angle --use-angle=gl http://localhost:5173",
     "build": "vite build",
     "preview": "vite preview"
   },
   "dependencies": {
     "@mediapipe/tasks-vision": "^0.10.14",
+    "@svenflow/micro-handpose": "^0.3.0",
     "tone": "^15.1.22"
   },
   "devDependencies": {
     "vite": "^5.4.2"
   }
 }
-

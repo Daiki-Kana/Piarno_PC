@@ -28,6 +28,8 @@
         <span id="telemetry-ms" class="telemetry-item">-- ms</span>
         <span class="telemetry-sep">/</span>
         <span id="telemetry-mode" class="telemetry-item telemetry-mode">LEGACY</span>
+        <span class="telemetry-sep">/</span>
+        <span id="telemetry-engine" class="telemetry-item telemetry-mode">--</span>
       </div>
 
       <!-- 画面右下に半透明で固定配置される右手運指ガイド -->
@@ -87,6 +89,14 @@
             <line x1="12" y1="19" x2="12" y2="22" class="icon-line" />
             <line x1="2" y1="12" x2="5" y2="12" class="icon-line" />
             <line x1="19" y1="12" x2="22" y2="12" class="icon-line" />
+          </svg>
+        </button>
+
+        <!-- 1 Euro Filter（平滑化）ON/OFF切替 -->
+        <button id="one-euro-toggle-btn" class="ctrl-circle-btn tracking-line-btn" aria-label="Toggle 1 Euro Filter" title="1 Euro Filter: ON" aria-pressed="true">
+          <svg viewBox="0 0 24 24" class="btn-icon" aria-hidden="true">
+            <path d="M 3,14 C 6,6 9,6 12,12 C 15,18 18,18 21,10" class="icon-line" />
+            <line x1="3" y1="21" x2="21" y2="3" class="slash-line" />
           </svg>
         </button>
 
