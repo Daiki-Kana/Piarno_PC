@@ -41,7 +41,7 @@ const cameraErrorCloseBtn = document.getElementById("camera-error-close-btn");
 // 設定・永続化状態
 // ==========================================================================
 const PC_CAMERA_STORAGE_KEY = "maracas_pc_camera_id";
-const PC_TRACKING_LINE_STORAGE_KEY = "maracas_pc_tracking_line";
+const PC_TRACKING_LINE_STORAGE_KEY = "maracas_pc_tracking_line_v2";
 
 const MAX_APP_FPS = 60;
 const MIN_APP_DISPATCH_INTERVAL_MS = 10.0;
@@ -156,8 +156,9 @@ function playShakerGrainLayer(ctx, clamped, isOpen, delaySec = 0, gainScale = 0.
   const peakGain = gainScale * (0.45 + clamped * 0.55);
   const decaySec = 0.065 + clamped * 0.04;
 
+  // 2msの鋭い立ち上がりで発音遅延を抑える
   gainNode.gain.setValueAtTime(0.001, startAt);
-  gainNode.gain.linearRampToValueAtTime(peakGain, startAt + 0.01);
+  gainNode.gain.linearRampToValueAtTime(peakGain, startAt + 0.002);
   gainNode.gain.exponentialRampToValueAtTime(0.0001, startAt + decaySec);
 
   src.connect(hpFilter);
@@ -210,7 +211,7 @@ function playMaracasSound(intensity = 0.7, isUpHit = false) {
 // ==========================================================================
 const SHAKE_DOWN_SPEED_TH = 2.8;       // 下振り発音の下方向正規化速度（palmSize / 秒）
 const SHAKE_RESET_SPEED_TH = 0.8;      // 再トリガー許可のための速度低下閾値（palmSize / 秒）
-const SHAKE_MIN_DOWN_STROKE = 0.40;    // 下振り最小移動距離（palmSize比：ある程度大きく振ってから発音）
+const SHAKE_MIN_DOWN_STROKE = 0.24;    // 下振り最小移動距離（palmSize比：誤発音防止と低遅延を両立）
 const SHAKE_MIN_PALM_SCALE_RATIO = 0.97;// カメラから遠ざかる後ろ引きを弾くサイズ維持率
 const SHAKE_COOLDOWN_MS = 200;         // 連続誤爆を防ぐ無検知時間（ms）
 
