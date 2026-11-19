@@ -1,0 +1,1354 @@
+/* ==========================================================================
+   白黒ミニマル - インカメラ鏡像（完全一致）トラッキングUI
+   ========================================================================== */
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body {
+  background-color: #000000;
+  color: #ffffff;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;
+  overscroll-behavior: none;
+}
+
+#app {
+  position: relative;
+  width: 100vw;
+  height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: #000000;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;
+  overscroll-behavior: none;
+}
+
+/* ビデオコンテナ：カメラ映像のアスペクト比を維持したまま、画面領域（幅・高さ）の限界まで最大拡大 */
+.video-container {
+  position: relative;
+  display: block;
+  /* 画面（ビューポート）内に収まる最大サイズをアスペクト比に基づき自動計算 */
+  width: min(100vw, calc(100vh * var(--video-aspect, 1.3333)));
+  height: min(100vh, calc(100vw / var(--video-aspect, 1.3333)));
+  width: min(100dvw, calc(100dvh * var(--video-aspect, 1.3333)));
+  height: min(100dvh, calc(100dvw / var(--video-aspect, 1.3333)));
+  line-height: 0; /* 下部の隙間を排除 */
+}
+
+/* Webカメラ映像：コンテナに合わせて100%拡大表示、鏡像ON時のみ反転 */
+#webcam {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+}
+
+#webcam.mirrored {
+  transform: scaleX(-1);
+}
+
+/* 骨格描画Canvas：ビデオと完全に同一矩形・同一比率で重畳 */
+#output-canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+#output-canvas.mirrored {
+  transform: scaleX(-1);
+}
+
+/* 左上：PC 60fps テレメトリピル（ボーダーレス・白黒ミニマル） */
+.pc-telemetry-pill {
+  position: fixed;
+  top: 16px;
+  left: 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 14px;
+  border-radius: 999px;
+  background-color: rgba(18, 18, 18, 0.85);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  color: rgba(255, 255, 255, 0.72);
+  z-index: 260;
+  pointer-events: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.telemetry-fps {
+  color: #ffffff;
+}
+
+.telemetry-sep {
+  color: rgba(255, 255, 255, 0.25);
+}
+
+.telemetry-mode {
+  color: rgba(255, 255, 255, 0.9);
+}
+
+/* デバッグHUD（画面左下・非表示） */
+.debug-panel {
+  display: none !important;
+  position: absolute;
+  bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+  left: calc(12px + env(safe-area-inset-left, 0px));
+  background-color: rgba(0, 0, 0, 0.85);
+  border: 1px solid #333333;
+  padding: 8px 12px;
+  border-radius: 4px;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.4;
+  color: #cccccc;
+  z-index: 100;
+  flex-direction: column;
+  gap: 3px;
+  pointer-events: none;
+}
+
+.debug-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.debug-label {
+  color: #777777;
+  font-weight: bold;
+}
+
+.debug-sublabel {
+  color: #555555;
+  font-size: 10px;
+}
+
+.debug-val {
+  color: #ffffff;
+  font-weight: 600;
+}
+
+.debug-separator {
+  color: #444444;
+  margin: 0 2px;
+}
+
+.debug-divider {
+  width: 100%;
+  height: 1px;
+  background-color: #222222;
+  margin: 2px 0;
+}
+
+/* エラー枠 */
+.debug-error {
+  color: #ff5555;
+  font-weight: bold;
+  margin-top: 4px;
+  border-top: 1px solid #442222;
+  padding-top: 4px;
+  max-width: 320px;
+  word-break: break-word;
+}
+
+.hidden {
+  display: none !important;
+}
+
+/* CSVアップロードボタン / サウンドテストボタン（白黒ミニマル） */
+.csv-upload-btn {
+  pointer-events: auto;
+  cursor: pointer;
+  background-color: transparent;
+  color: #888888;
+  border: 1px solid #444444;
+  padding: 1px 5px;
+  border-radius: 2px;
+  font-size: 9px;
+  letter-spacing: 0.5px;
+  transition: all 0.15s ease;
+  user-select: none;
+  margin-left: auto;
+}
+
+.csv-upload-btn:hover {
+  background-color: #ffffff;
+  color: #000000;
+  border-color: #ffffff;
+}
+
+/* 打鍵時の一瞬の白黒反転ハイライト */
+.spike-highlight {
+  background-color: #ffffff;
+  color: #000000 !important;
+  padding: 0 4px;
+  border-radius: 2px;
+  font-weight: bold;
+}
+
+
+/* 初回オーディオ開始バナー */
+.audio-start-banner {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  background-color: rgba(255, 255, 255, 0.95);
+  color: #000000;
+  padding: 5px 16px;
+  border-radius: 20px;
+  font-size: 11px;
+  font-weight: bold;
+  z-index: 300;
+  cursor: pointer;
+  box-shadow: 0 2px 14px rgba(255, 255, 255, 0.35);
+  transition: opacity 0.3s ease, transform 0.3s ease;
+  pointer-events: auto;
+  user-select: none;
+}
+.audio-start-banner.hidden {
+  opacity: 0;
+  transform: translateX(-50%) translateY(-12px);
+  pointer-events: none;
+}
+
+/* ==========================================================================
+   右上固定：コントロール群（トラッキングライン切替ボタン ＆ 楽曲選択ボタン）
+   ========================================================================== */
+.top-right-controls {
+  position: absolute;
+  top: calc(16px + env(safe-area-inset-top, 0px));
+  right: calc(16px + env(safe-area-inset-right, 0px));
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  pointer-events: auto;
+}
+
+.song-select-container {
+  position: relative;
+  pointer-events: auto;
+}
+
+/* ==========================================================================
+   ノーツ描画オーバーレイCanvas（画面全体に重畳・クリック透過）
+   ========================================================================== */
+.notes-canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 215;
+}
+
+/* ==========================================================================
+   右手運指ガイドウィジェット（画面右下に半透明・中サイズで固定配置）
+   ========================================================================== */
+.hand-guide-widget {
+  --hand-guide-size: 200px;
+  position: absolute;
+  right: calc(16px + env(safe-area-inset-right, 0px));
+  bottom: calc(-10px + env(safe-area-inset-bottom, 0px));
+  top: auto;
+  left: auto;
+  width: var(--hand-guide-size, 200px);
+  height: var(--hand-guide-size, 200px);
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  user-select: none;
+  -webkit-user-select: none;
+  outline: none;
+  pointer-events: none;
+  z-index: 210;
+  opacity: 0.80;
+  transition: opacity 0.2s ease, transform 0.15s cubic-bezier(0.2, 0.9, 0.3, 1), filter 0.15s ease;
+}
+
+/* 左下のドラッグリサイズつまみ（固定配置のため非表示） */
+.hand-guide-resizer {
+  display: none;
+}
+
+.hand-guide-resizer:hover,
+.hand-guide-resizer.active-drag {
+  opacity: 1;
+  transform: scale(1.15);
+}
+
+.hand-guide-resizer .resizer-icon {
+  width: 12px;
+  height: 12px;
+  stroke: rgba(255, 255, 255, 0.7);
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  fill: none;
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.8));
+}
+
+.hand-guide-resizer:hover .resizer-icon,
+.hand-guide-resizer.active-drag .resizer-icon {
+  stroke: #ffffff;
+  filter: drop-shadow(0 0 4px rgba(255, 255, 255, 0.9));
+}
+
+/* 手のひら・各指のSVGベース（ドロップシャドウで背景から浮かび上がらせる） */
+.hand-guide-svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+  pointer-events: none;
+  overflow: visible;
+  filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.55));
+}
+
+/* 手全体の一体型シームレスベース（指定色 #FEDCBD、つなぎ目完全ゼロ） */
+.hand-base-unified {
+  fill: #FEDCBD;
+  stroke: none;
+}
+
+/* 各指オーバーレイ（通常時は完全非表示でつなぎ目・重なりを物理排除） */
+.hand-finger {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s cubic-bezier(0.2, 0.9, 0.3, 1);
+}
+
+/* 選択された指（アクティブ：鮮やかな水色 #00E5FF ソリッド＋水色ネオングロー） */
+.hand-finger.active {
+  opacity: 1;
+}
+
+.hand-finger.active .finger-path {
+  fill: #00E5FF;
+  stroke: none;
+  filter: drop-shadow(0 0 6px #00E5FF) drop-shadow(0 0 16px rgba(0, 229, 255, 0.9));
+}
+
+/* 打鍵時の一瞬のポップフィードバック */
+.hand-guide-widget.hit-pop {
+  transform: scale(1.1);
+  filter: brightness(1.25);
+}
+
+.ctrl-menu-container,
+.song-select-container {
+  position: relative;
+  pointer-events: auto;
+}
+
+/* 右上コントロール共通丸ボタン（直径38px・完全ボーダーレス） */
+.ctrl-circle-btn {
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  background-color: rgba(24, 24, 24, 0.86);
+  border: none;
+  color: #ffffff;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  user-select: none;
+  -webkit-user-select: none;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  transition: background-color 0.2s ease, transform 0.18s cubic-bezier(0.2, 0.9, 0.3, 1), opacity 0.2s ease;
+  outline: none;
+  padding: 0;
+}
+
+.ctrl-circle-btn:hover {
+  background-color: rgba(52, 52, 52, 0.95);
+  transform: scale(1.06);
+}
+
+.ctrl-circle-btn:active {
+  transform: scale(0.92);
+}
+
+.ctrl-circle-btn .btn-icon {
+  width: 18px;
+  height: 18px;
+  display: block;
+}
+
+.ctrl-circle-btn .icon-line {
+  fill: none;
+  stroke: #ffffff;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition: stroke 0.2s ease, opacity 0.2s ease;
+}
+
+.ctrl-circle-btn.off {
+  background-color: rgba(16, 16, 16, 0.65);
+}
+
+.ctrl-circle-btn.off .icon-line {
+  opacity: 0.4;
+}
+
+/* トラッキングライン切替ボタンのアイコンスタイル */
+.tracking-line-btn .btn-icon {
+  width: 20px;
+  height: 20px;
+  display: block;
+}
+
+.tracking-line-btn .icon-line {
+  fill: none;
+  stroke: #ffffff;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition: stroke 0.2s ease, opacity 0.2s ease;
+}
+
+.tracking-line-btn .icon-dot {
+  fill: #ffffff;
+  transition: fill 0.2s ease, opacity 0.2s ease;
+}
+
+.tracking-line-btn .icon-dot-tip {
+  fill: #00E5FF;
+  filter: drop-shadow(0 0 3px #00E5FF);
+  transition: all 0.2s ease;
+}
+
+.tracking-line-btn .slash-line {
+  display: none;
+  stroke: rgba(255, 255, 255, 0.85);
+  stroke-width: 2.2;
+  stroke-linecap: round;
+}
+
+/* OFF（トラッキングライン非表示）状態 */
+.tracking-line-btn.off {
+  border-color: rgba(255, 255, 255, 0.2);
+  background-color: rgba(15, 15, 15, 0.7);
+}
+
+.tracking-line-btn.off .icon-line,
+.tracking-line-btn.off .icon-dot {
+  opacity: 0.35;
+}
+
+.tracking-line-btn.off .icon-dot-tip {
+  fill: rgba(255, 255, 255, 0.35);
+  filter: none;
+}
+
+.tracking-line-btn.off .slash-line {
+  display: block;
+  stroke: #ff5252;
+  filter: drop-shadow(0 0 2px rgba(255, 82, 82, 0.8));
+}
+
+.song-select-btn {
+  font-size: 16px;
+}
+
+/* ポップアップメニュー（カメラ選択・曲選択共通・完全ボーダーレス） */
+.popup-menu,
+.song-select-menu {
+  position: absolute;
+  top: 46px;
+  right: 0;
+  min-width: 190px;
+  background-color: rgba(20, 20, 20, 0.94);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: none;
+  border-radius: 10px;
+  padding: 8px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.75);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  z-index: 300;
+}
+
+.popup-menu-header,
+.song-menu-header {
+  font-size: 10px;
+  font-weight: 700;
+  color: rgba(255, 255, 255, 0.45);
+  padding: 4px 10px 6px;
+  letter-spacing: 0.8px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.camera-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.camera-menu-item,
+.song-menu-item {
+  width: 100%;
+  text-align: left;
+  padding: 8px 10px;
+  background-color: transparent;
+  border: none;
+  border-radius: 6px;
+  color: #cccccc;
+  font-size: 12px;
+  cursor: pointer;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  transition: background-color 0.15s ease, color 0.15s ease;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.camera-menu-item:hover,
+.song-menu-item:hover {
+  background-color: rgba(255, 255, 255, 0.1);
+  color: #ffffff;
+}
+
+.camera-menu-item.active,
+.song-menu-item.active {
+  background-color: #ffffff;
+  color: #000000;
+  font-weight: 600;
+}
+
+/* ==========================================================================
+   カウントダウンオーバーレイ（3・2・1・START!・白黒シンプル）
+   ========================================================================== */
+.countdown-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: rgba(0, 0, 0, 0.65);
+  z-index: 300;
+  pointer-events: none;
+}
+
+.countdown-text {
+  font-size: 76px;
+  font-weight: 800;
+  color: #ffffff;
+  letter-spacing: 2px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
+  text-shadow: 0 0 16px rgba(0, 0, 0, 0.9), 0 0 32px rgba(255, 255, 255, 0.4);
+  user-select: none;
+  transition: transform 0.18s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+}
+
+/* ==========================================================================
+   演奏進捗バッジ（画面上部中央・白黒ミニマル）
+   ========================================================================== */
+.song-progress-badge {
+  position: absolute;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  background-color: rgba(20, 20, 20, 0.85);
+  border: 1px solid #333333;
+  color: #eeeeee;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 1.5px;
+  padding: 4px 14px;
+  border-radius: 4px;
+  z-index: 200;
+  pointer-events: none;
+  user-select: none;
+}
+
+/* ==========================================================================
+   完走時クリア通知オーバーレイ（COMPLETE・白黒ミニマル）
+   ========================================================================== */
+.clear-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background-color: rgba(0, 0, 0, 0.75);
+  z-index: 350;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.3s ease;
+}
+
+.clear-overlay.show {
+  opacity: 1;
+}
+
+.clear-title {
+  font-size: 56px;
+  font-weight: 800;
+  color: #ffffff;
+  letter-spacing: 4px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
+  text-shadow: 0 0 12px rgba(0, 0, 0, 0.8);
+  user-select: none;
+}
+
+.clear-subtitle {
+  font-size: 13px;
+  font-weight: 500;
+  color: #888888;
+  letter-spacing: 3px;
+  margin-top: 8px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
+  user-select: none;
+}
+
+/* ==========================================================================
+   カメラエラー・ガイダンス通知オーバーレイ（白黒ミニマル）
+   ========================================================================== */
+.camera-error-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: rgba(0, 0, 0, 0.85);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  z-index: 400;
+  padding: 20px;
+}
+
+.camera-error-modal {
+  position: relative;
+  background-color: #141414;
+  border: none;
+  border-radius: 14px;
+  max-width: 380px;
+  width: 100%;
+  padding: 28px 24px 24px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.85);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  text-align: left;
+}
+
+.modal-close-icon-btn {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: none;
+  background-color: rgba(255, 255, 255, 0.08);
+  color: #ffffff;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background-color 0.15s ease, transform 0.15s ease;
+}
+
+.modal-close-icon-btn:hover {
+  background-color: rgba(255, 255, 255, 0.18);
+  transform: scale(1.06);
+}
+
+.modal-close-icon-btn .btn-icon {
+  width: 16px;
+  height: 16px;
+}
+
+.modal-close-icon-btn .icon-line {
+  fill: none;
+  stroke: #ffffff;
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+
+.camera-error-badge {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 1.5px;
+  color: #000000;
+  background-color: #ffffff;
+  padding: 3px 9px;
+  border-radius: 999px;
+  margin-bottom: 14px;
+}
+
+.camera-error-title {
+  font-size: 17px;
+  font-weight: 700;
+  color: #ffffff;
+  margin-bottom: 10px;
+  letter-spacing: 0.4px;
+}
+
+.camera-error-message {
+  font-size: 13px;
+  line-height: 1.6;
+  color: rgba(255, 255, 255, 0.68);
+  margin-bottom: 22px;
+  word-break: break-word;
+}
+
+.camera-error-actions {
+  display: flex;
+  width: 100%;
+  gap: 10px;
+}
+
+.camera-error-btn {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: #ffffff;
+  color: #000000;
+  border: none;
+  border-radius: 8px;
+  padding: 11px 14px;
+  cursor: pointer;
+  transition: background-color 0.15s ease, transform 0.15s ease;
+}
+
+.camera-error-btn .btn-icon {
+  width: 18px;
+  height: 18px;
+}
+
+.camera-error-btn .icon-line {
+  fill: none;
+  stroke: #000000;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.camera-error-btn:hover {
+  background-color: #e4e4e4;
+}
+
+.camera-error-btn:active {
+  transform: scale(0.97);
+}
+
+/* ==========================================================================
+   タップ起動フォールバック（Autoplay Policy・低電力モード対策・白黒ミニマル）
+   ========================================================================== */
+.camera-tap-prompt {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: rgba(0, 0, 0, 0.7);
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
+  z-index: 380;
+  pointer-events: auto;
+}
+
+.camera-tap-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  background-color: #ffffff;
+  color: #000000;
+  border: 1px solid #ffffff;
+  border-radius: 30px;
+  padding: 14px 28px;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  cursor: pointer;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.6);
+  user-select: none;
+  transition: transform 0.15s ease, background-color 0.15s ease, color 0.15s ease;
+}
+
+.camera-tap-btn:hover,
+.camera-tap-btn:active {
+  background-color: #000000;
+  color: #ffffff;
+  border-color: #ffffff;
+  transform: scale(1.04);
+}
+
+.camera-tap-icon {
+  font-size: 13px;
+  line-height: 1;
+}
+
+/* ==========================================================================
+   アプリ内ブラウザ（WebView）誘導モーダル（白黒ミニマル）
+   ========================================================================== */
+.inapp-browser-modal {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: rgba(0, 0, 0, 0.88);
+  backdrop-filter: blur(5px);
+  -webkit-backdrop-filter: blur(5px);
+  z-index: 450;
+  padding: 20px;
+}
+
+.inapp-browser-card {
+  background-color: #111111;
+  border: 1px solid #333333;
+  border-radius: 6px;
+  max-width: 440px;
+  width: 100%;
+  padding: 24px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.85);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  text-align: left;
+}
+
+.inapp-browser-badge {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 1.5px;
+  color: #000000;
+  background-color: #ffffff;
+  padding: 2px 8px;
+  border-radius: 2px;
+  margin-bottom: 12px;
+}
+
+.inapp-browser-title {
+  font-size: 17px;
+  font-weight: 700;
+  color: #ffffff;
+  margin-bottom: 12px;
+  letter-spacing: 0.5px;
+}
+
+.inapp-browser-desc {
+  font-size: 13px;
+  line-height: 1.6;
+  color: #cccccc;
+  margin-bottom: 20px;
+  word-break: break-word;
+}
+
+.inapp-browser-actions {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  gap: 8px;
+}
+
+.inapp-btn {
+  width: 100%;
+  background-color: #222222;
+  color: #ffffff;
+  border: 1px solid #444444;
+  border-radius: 4px;
+  padding: 10px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  letter-spacing: 0.5px;
+  text-align: center;
+  text-decoration: none;
+  box-sizing: border-box;
+  transition: all 0.15s ease;
+}
+
+.inapp-btn:hover {
+  background-color: #333333;
+  border-color: #666666;
+}
+
+.inapp-btn-primary {
+  background-color: #ffffff;
+  color: #000000;
+  border-color: #ffffff;
+}
+
+.inapp-btn-primary:hover {
+  background-color: #e0e0e0;
+  border-color: #e0e0e0;
+}
+
+.inapp-btn-secondary {
+  background-color: transparent;
+  color: #888888;
+  border-color: #333333;
+}
+
+.inapp-btn-secondary:hover {
+  background-color: #1a1a1a;
+  color: #cccccc;
+  border-color: #555555;
+}
+
+.inapp-copy-toast {
+  align-self: center;
+  margin-top: 12px;
+  background-color: #ffffff;
+  color: #000000;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 4px 12px;
+  border-radius: 3px;
+  letter-spacing: 0.5px;
+  animation: fadeIn 0.2s ease;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* ==========================================================================
+   起動時：楽曲選択＆スタートモーダル（シンプル・白黒ミニマル）
+   ========================================================================== */
+.start-modal {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: rgba(0, 0, 0, 0.85);
+  backdrop-filter: blur(5px);
+  -webkit-backdrop-filter: blur(5px);
+  z-index: 390;
+  padding: 16px;
+  opacity: 1;
+  transition: opacity 0.25s ease, visibility 0.25s ease;
+}
+
+.start-modal.hidden {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.start-card {
+  background-color: #141414;
+  border: none;
+  border-radius: 14px;
+  max-width: 310px;
+  width: 100%;
+  padding: 26px 22px;
+  box-shadow: 0 14px 48px rgba(0, 0, 0, 0.9);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+}
+
+.start-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: rgba(255, 255, 255, 0.5);
+  letter-spacing: 2px;
+  margin-bottom: 18px;
+  text-transform: uppercase;
+}
+
+.start-song-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  margin-bottom: 20px;
+}
+
+.start-song-item {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: rgba(255, 255, 255, 0.05);
+  border: none;
+  border-radius: 8px;
+  padding: 12px 14px;
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 13px;
+  cursor: pointer;
+  text-align: center;
+  transition: background-color 0.15s ease, color 0.15s ease, transform 0.12s ease;
+  user-select: none;
+  width: 100%;
+}
+
+.start-song-item:hover {
+  background-color: rgba(255, 255, 255, 0.1);
+  color: #ffffff;
+}
+
+.start-song-item.selected {
+  background-color: rgba(255, 255, 255, 0.18);
+  color: #ffffff;
+  font-weight: 600;
+}
+
+.start-song-name {
+  letter-spacing: 0.4px;
+}
+
+.start-play-btn {
+  width: 100%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background-color: #ffffff;
+  color: #000000;
+  border: none;
+  border-radius: 8px;
+  padding: 13px 16px;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 1.8px;
+  cursor: pointer;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  user-select: none;
+  transition: background-color 0.15s ease, transform 0.12s ease;
+}
+
+.start-play-btn:hover {
+  background-color: #e4e4e4;
+  transform: translateY(-1px);
+}
+
+.start-play-btn:active {
+  transform: scale(0.98);
+  background-color: #cccccc;
+}
+
+.start-play-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  transform: none;
+}
+
+/* ==========================================================================
+   BlanchTouch 実験用デバッグオーバーレイ（白黒・完全ボーダーレス）
+   ========================================================================== */
+.blanch-debug-btn .btn-icon {
+  width: 19px;
+  height: 19px;
+  display: block;
+}
+
+.blanch-debug-btn .icon-line {
+  fill: none;
+  stroke: #ffffff;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+}
+
+.blanch-debug-btn .icon-dot-tip {
+  fill: #ffffff;
+}
+
+.blanch-debug-btn.off {
+  opacity: 0.55;
+}
+
+.blanch-debug-overlay {
+  position: absolute;
+  bottom: calc(14px + env(safe-area-inset-bottom, 0px));
+  left: calc(14px + env(safe-area-inset-left, 0px));
+  width: 288px;
+  max-width: calc(100vw - 28px);
+  padding: 12px;
+  border: none;
+  border-radius: 14px;
+  background-color: rgba(14, 14, 14, 0.88);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  color: #f0f0f0;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  z-index: 260;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  pointer-events: auto;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.55);
+}
+
+.blanch-debug-overlay.hidden {
+  display: none;
+}
+
+.blanch-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.blanch-mode-group {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 3px;
+  border-radius: 9px;
+  background-color: rgba(255, 255, 255, 0.08);
+}
+
+.blanch-mode-btn {
+  border: none;
+  border-radius: 7px;
+  padding: 5px 9px;
+  font-size: 11px;
+  font-weight: 600;
+  font-family: inherit;
+  color: #a0a0a0;
+  background-color: transparent;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease, transform 0.12s ease;
+}
+
+.blanch-mode-btn:active {
+  transform: scale(0.95);
+}
+
+.blanch-mode-btn.active {
+  background-color: #ffffff;
+  color: #111111;
+}
+
+.blanch-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.blanch-icon-btn {
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 8px;
+  background-color: rgba(255, 255, 255, 0.08);
+  color: #ffffff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  padding: 0;
+  transition: background-color 0.15s ease, transform 0.12s ease;
+}
+
+.blanch-icon-btn:hover {
+  background-color: rgba(255, 255, 255, 0.18);
+}
+
+.blanch-icon-btn:active {
+  transform: scale(0.92);
+}
+
+.blanch-svg-icon {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.blanch-body {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.blanch-preview-wrap {
+  position: relative;
+  width: 72px;
+  height: 72px;
+  flex-shrink: 0;
+  border-radius: 10px;
+  overflow: hidden;
+  background-color: #000000;
+}
+
+.blanch-roi-preview {
+  display: block;
+  width: 72px;
+  height: 72px;
+}
+
+.blanch-state-pill {
+  position: absolute;
+  left: 4px;
+  bottom: 4px;
+  padding: 2px 5px;
+  border-radius: 4px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  background-color: rgba(0, 0, 0, 0.72);
+  color: #bbbbbb;
+}
+
+.blanch-state-pill.active {
+  background-color: #ffffff;
+  color: #111111;
+}
+
+.blanch-metrics {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.blanch-metric-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 11px;
+}
+
+.blanch-sub-row {
+  font-size: 10px;
+  gap: 5px;
+}
+
+.blanch-metric-label {
+  color: #7a7a7a;
+  font-weight: 700;
+}
+
+.blanch-metric-val {
+  color: #ffffff;
+  font-weight: 700;
+}
+
+.blanch-metric-sub {
+  color: #888888;
+  font-size: 10px;
+  margin-left: auto;
+}
+
+.blanch-bar-track {
+  position: relative;
+  width: 100%;
+  height: 8px;
+  border-radius: 4px;
+  background-color: rgba(255, 255, 255, 0.12);
+  overflow: hidden;
+}
+
+.blanch-bar-fill {
+  height: 100%;
+  width: 0%;
+  background-color: #ffffff;
+  border-radius: 4px;
+  transition: width 0.04s linear;
+}
+
+.blanch-bar-marker {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  pointer-events: none;
+}
+
+.blanch-bar-marker.on {
+  background-color: #ffffff;
+  opacity: 0.9;
+}
+
+.blanch-bar-marker.off {
+  background-color: #777777;
+  opacity: 0.8;
+}
+
+.blanch-sliders {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background-color: rgba(255, 255, 255, 0.06);
+}
+
+.blanch-slider-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 10px;
+}
+
+.blanch-slider-label {
+  width: 28px;
+  color: #888888;
+  font-weight: 700;
+}
+
+.blanch-slider-row input[type="range"] {
+  flex: 1;
+  height: 4px;
+  accent-color: #ffffff;
+  cursor: pointer;
+}
+
+.blanch-slider-val {
+  width: 34px;
+  text-align: right;
+  color: #ffffff;
+  font-weight: 600;
+}
+
+
+

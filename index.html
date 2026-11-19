@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Piarno PC</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <div id="app">
+      <!-- メイン映像コンテナ（ビデオとCanvasを自然比率で完全重畳） -->
+      <div class="video-container">
+        <video id="webcam" class="mirrored" playsinline autoplay muted></video>
+        <canvas id="output-canvas" class="mirrored"></canvas>
+      </div>
+
+      <!-- 画面上部から手先へ落ちるノーツ描画オーバーレイCanvas -->
+      <canvas id="notes-canvas" class="notes-canvas"></canvas>
+
+      <!-- 左上：PC 60fps テレメトリピル（カメラFPS・アプリFPS・解像度・推論時間・判定モード） -->
+      <div id="pc-telemetry-pill" class="pc-telemetry-pill" aria-label="Performance Telemetry">
+        <span id="telemetry-cam-fps" class="telemetry-item telemetry-fps">CAM --</span>
+        <span class="telemetry-sep">/</span>
+        <span id="telemetry-app-fps" class="telemetry-item telemetry-fps">APP -- FPS</span>
+        <span class="telemetry-sep">/</span>
+        <span id="telemetry-res" class="telemetry-item">--×--</span>
+        <span class="telemetry-sep">/</span>
+        <span id="telemetry-ms" class="telemetry-item">-- ms</span>
+        <span class="telemetry-sep">/</span>
+        <span id="telemetry-mode" class="telemetry-item telemetry-mode">LEGACY</span>
+      </div>
+
+      <!-- 画面右下に半透明で固定配置される右手運指ガイド -->
+      <div id="hand-guide-widget" class="hand-guide-widget" title="Right Hand Guide" role="region" aria-label="Right Hand Guide">
+        <svg class="hand-guide-svg" viewBox="0 0 200 200" aria-hidden="true">
+          <path class="hand-base-unified" d="M 88,172 L 142,172 L 142,160 C 146,140 155,120 155,98 L 155,58 A 8.5,8.5 0 0,0 138,58 L 138,98 L 135,98 L 135,38 A 8.5,8.5 0 0,0 118,38 L 118,94 L 115,94 L 115,28 A 8.5,8.5 0 0,0 97,28 L 97,94 L 94,94 L 94,40 A 8.5,8.5 0 0,0 77,40 L 77,106 C 78,114 80,118 80,118 L 49,94 A 10,10 0 0,0 36,108 L 68,132 C 72,138 78,148 78,154 L 88,160 L 88,172 Z" />
+
+          <g id="hand-finger-THUMB" class="hand-finger" data-finger="THUMB">
+            <path class="finger-path" d="M 80,118 L 49,94 A 10,10 0 0,0 36,108 L 68,132 C 73,127 77,122 80,118 Z" />
+          </g>
+          <g id="hand-finger-INDEX" class="hand-finger" data-finger="INDEX">
+            <path class="finger-path" d="M 77,98 L 77,40 A 8.5,8.5 0 0,1 94,40 L 94,98 Z" />
+          </g>
+          <g id="hand-finger-MIDDLE" class="hand-finger" data-finger="MIDDLE">
+            <path class="finger-path" d="M 97,94 L 97,28 A 8.5,8.5 0 0,1 115,28 L 115,94 Z" />
+          </g>
+          <g id="hand-finger-RING" class="hand-finger" data-finger="RING">
+            <path class="finger-path" d="M 118,94 L 118,38 A 8.5,8.5 0 0,1 135,38 L 135,94 Z" />
+          </g>
+          <g id="hand-finger-PINKY" class="hand-finger" data-finger="PINKY">
+            <path class="finger-path" d="M 138,98 L 138,58 A 8.5,8.5 0 0,1 155,58 L 155,98 Z" />
+          </g>
+        </svg>
+      </div>
+
+      <!-- 画面右上コントロール群（カメラ選択・鏡像切替・判定モード・ライン表示・楽曲選択） -->
+      <div class="top-right-controls">
+        <!-- Webカメラデバイス選択 -->
+        <div class="ctrl-menu-container">
+          <button id="camera-select-btn" class="ctrl-circle-btn" aria-label="Select Camera" title="Select Camera">
+            <svg viewBox="0 0 24 24" class="btn-icon" aria-hidden="true">
+              <rect x="3" y="7" width="13" height="10" rx="2" class="icon-line" />
+              <polygon points="16,10 21,7.5 21,16.5 16,14" class="icon-line" />
+            </svg>
+          </button>
+          <div id="camera-select-menu" class="popup-menu hidden">
+            <div class="popup-menu-header">CAMERA</div>
+            <div id="camera-list" class="camera-list"></div>
+          </div>
+        </div>
+
+        <!-- 鏡像（左右反転）切替 -->
+        <button id="mirror-toggle-btn" class="ctrl-circle-btn" aria-label="Toggle Mirror" title="Toggle Mirror" aria-pressed="true">
+          <svg viewBox="0 0 24 24" class="btn-icon" aria-hidden="true">
+            <line x1="12" y1="4" x2="12" y2="20" class="icon-line" />
+            <polygon points="4,8 9,12 4,16" class="icon-line" />
+            <polygon points="20,8 15,12 20,16" class="icon-line" />
+          </svg>
+        </button>
+
+        <!-- 判定モード / BlanchTouch デバッグオーバーレイ切替 -->
+        <button id="blanch-debug-toggle-btn" class="ctrl-circle-btn blanch-debug-btn off" aria-label="Detection Mode &amp; Debug" title="Detection Mode &amp; Debug" aria-pressed="false">
+          <svg viewBox="0 0 24 24" class="btn-icon" aria-hidden="true">
+            <circle cx="12" cy="12" r="6" class="icon-line" />
+            <circle cx="12" cy="12" r="2" class="icon-dot-tip" />
+            <line x1="12" y1="2" x2="12" y2="5" class="icon-line" />
+            <line x1="12" y1="19" x2="12" y2="22" class="icon-line" />
+            <line x1="2" y1="12" x2="5" y2="12" class="icon-line" />
+            <line x1="19" y1="12" x2="22" y2="12" class="icon-line" />
+          </svg>
+        </button>
+
+        <!-- トラッキングライン表示切替 -->
+        <button id="tracking-line-toggle-btn" class="ctrl-circle-btn tracking-line-btn off" aria-label="Toggle Tracking Lines" title="Toggle Tracking Lines" aria-pressed="false">
+          <svg viewBox="0 0 24 24" class="btn-icon" aria-hidden="true">
+            <path class="icon-line" d="M 4,19 L 10,13 L 14,16 L 20,5" />
+            <circle cx="4" cy="19" r="2" class="icon-dot" />
+            <circle cx="10" cy="13" r="2" class="icon-dot" />
+            <circle cx="14" cy="16" r="2" class="icon-dot" />
+            <circle cx="20" cy="5" r="2.5" class="icon-dot-tip" />
+            <line x1="3" y1="21" x2="21" y2="3" class="slash-line" />
+          </svg>
+        </button>
+
+        <!-- 楽曲選択 -->
+        <div class="song-select-container">
+          <button id="song-select-btn" class="ctrl-circle-btn song-select-btn" aria-label="Select Song" title="Select Song">
+            <svg viewBox="0 0 24 24" class="btn-icon" aria-hidden="true">
+              <path d="M 9,17 L 9,6 L 19,4 L 19,15" class="icon-line" />
+              <circle cx="7" cy="17" r="2.5" class="icon-line" />
+              <circle cx="17" cy="15" r="2.5" class="icon-line" />
+            </svg>
+          </button>
+          <div id="song-select-menu" class="song-select-menu hidden">
+            <div class="song-menu-header">MODE / SONG</div>
+            <button class="song-menu-item active" data-song="free_session">Free Session</button>
+            <button class="song-menu-item" data-song="ode_to_joy">Ode to Joy</button>
+            <button class="song-menu-item" data-song="mary_had_a_little_lamb">Mary Had a Little Lamb</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- カウントダウンオーバーレイ（3・2・1・START!） -->
+      <div id="countdown-overlay" class="countdown-overlay hidden">
+        <div id="countdown-text" class="countdown-text">3</div>
+      </div>
+
+      <!-- 画面上部：演奏進捗テキストバッジ -->
+      <div id="song-progress-badge" class="song-progress-badge">1 / 62</div>
+
+      <!-- 完走時クリア通知オーバーレイ -->
+      <div id="clear-overlay" class="clear-overlay hidden">
+        <div class="clear-title">COMPLETE</div>
+        <div class="clear-subtitle">100% CLEAR</div>
+      </div>
+
+      <!-- カメラエラーオーバーレイ（白黒・ボーダーレス・英語UI） -->
+      <div id="camera-error-overlay" class="camera-error-overlay hidden">
+        <div class="camera-error-modal">
+          <button id="camera-error-close-btn" class="modal-close-icon-btn" aria-label="Close" title="Close">
+            <svg viewBox="0 0 24 24" class="btn-icon" aria-hidden="true">
+              <line x1="6" y1="6" x2="18" y2="18" class="icon-line" />
+              <line x1="18" y1="6" x2="6" y2="18" class="icon-line" />
+            </svg>
+          </button>
+          <div class="camera-error-badge">CAMERA ERROR</div>
+          <div id="camera-error-title" class="camera-error-title">Camera Unavailable</div>
+          <p id="camera-error-message" class="camera-error-message">
+            Camera access was denied or no 60fps webcam was found. Allow camera permission in browser settings and retry.
+          </p>
+          <div class="camera-error-actions">
+            <button id="camera-error-reload-btn" class="camera-error-btn" aria-label="Reload">
+              <svg viewBox="0 0 24 24" class="btn-icon" aria-hidden="true">
+                <path d="M 4,12 A 8,8 0 1,1 7,18.2" class="icon-line" />
+                <polyline points="4,7 4,12 9,12" class="icon-line" />
+              </svg>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 起動時：スタートモーダル（白黒・ボーダーレス・英語UI） -->
+      <div id="start-modal" class="start-modal">
+        <div class="start-card">
+          <div class="start-title">PIARNO PC</div>
+          <div class="start-song-list">
+            <button class="start-song-item selected" data-song="free_session">
+              <span class="start-song-name">Free Session</span>
+            </button>
+            <button class="start-song-item" data-song="ode_to_joy">
+              <span class="start-song-name">Ode to Joy</span>
+            </button>
+            <button class="start-song-item" data-song="mary_had_a_little_lamb">
+              <span class="start-song-name">Mary Had a Little Lamb</span>
+            </button>
+          </div>
+          <button id="start-play-btn" class="start-play-btn">
+            <span id="start-play-text">START</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- デバッグHUD（左下・必要時のみ表示） -->
+      <div id="debug-panel" class="debug-panel">
+        <div class="debug-row">
+          <span class="debug-label">STATUS:</span>
+          <span id="status-text" class="debug-val">INIT</span>
+        </div>
+        <div class="debug-row">
+          <span class="debug-label">FPS:</span>
+          <span id="fps-counter" class="debug-val">-</span>
+          <span class="debug-separator">/</span>
+          <span class="debug-label">TIME:</span>
+          <span id="inference-time" class="debug-val">- ms</span>
+        </div>
+        <div class="debug-row">
+          <span class="debug-label">HANDS:</span>
+          <span id="hands-count" class="debug-val">0</span>
+          <span class="debug-separator">/</span>
+          <span class="debug-label">CAM:</span>
+          <span id="cam-info" class="debug-val">WEBCAM</span>
+        </div>
+        <div class="debug-divider"></div>
+        <div class="debug-row">
+          <span class="debug-label">TARGET:</span>
+          <span id="target-finger-val" class="debug-val">-</span>
+          <span class="debug-separator">/</span>
+          <span id="target-tap-progress" class="debug-val">1 / 62</span>
+        </div>
+        <div class="debug-row">
+          <span class="debug-label">TIP X:</span>
+          <span id="tip-x-val" class="debug-val">-</span>
+          <span class="debug-separator">/</span>
+          <span class="debug-label">TIP Y:</span>
+          <span id="tip-y-val" class="debug-val">-</span>
+        </div>
+        <div class="debug-row">
+          <span class="debug-label">REL Y:</span>
+          <span id="rel-y-val" class="debug-val">-</span>
+          <span class="debug-separator">/</span>
+          <span class="debug-label">TH:</span>
+          <span id="th-val" class="debug-val">-</span>
+        </div>
+        <div class="debug-row">
+          <span class="debug-label">VEL Y:</span>
+          <span id="vel-y-val" class="debug-val">-</span>
+          <span class="debug-separator">/</span>
+          <span class="debug-label">V_TH:</span>
+          <span id="v-th-val" class="debug-val">-</span>
+        </div>
+        <div class="debug-row">
+          <span class="debug-label">STATE:</span>
+          <span id="state-val" class="debug-val">IDLE</span>
+          <span class="debug-separator">/</span>
+          <span class="debug-label">TAPS:</span>
+          <span id="tap-count-val" class="debug-val">0</span>
+        </div>
+        <div id="error-box" class="debug-error hidden"></div>
+      </div>
+
+      <!-- BlanchTouch / 判定モード切替オーバーレイ（白黒・ボーダーレス・アイコンファースト） -->
+      <div id="blanch-debug-overlay" class="blanch-debug-overlay hidden" role="region" aria-label="Detection Mode Debug">
+        <div class="blanch-header">
+          <div class="blanch-mode-group" role="group" aria-label="Detection Mode">
+            <button type="button" class="blanch-mode-btn active" data-mode="legacy">Legacy</button>
+            <button type="button" class="blanch-mode-btn" data-mode="blanch_only">Blanch</button>
+            <button type="button" class="blanch-mode-btn" data-mode="hybrid">Hybrid</button>
+          </div>
+          <div class="blanch-header-actions">
+            <button type="button" id="blanch-reset-btn" class="blanch-icon-btn" aria-label="Reset" title="Reset Baseline &amp; Settings">
+              <svg viewBox="0 0 24 24" class="blanch-svg-icon" aria-hidden="true">
+                <path d="M 4,12 A 8,8 0 1,1 7,18.2" />
+                <polyline points="4,7 4,12 9,12" />
+              </svg>
+            </button>
+            <button type="button" id="blanch-close-btn" class="blanch-icon-btn" aria-label="Close" title="Close">
+              <svg viewBox="0 0 24 24" class="blanch-svg-icon" aria-hidden="true">
+                <line x1="6" y1="6" x2="18" y2="18" />
+                <line x1="18" y1="6" x2="6" y2="18" />
+              </svg>
+            </button>
+          </div>
+        </div>
+
+        <div class="blanch-body">
+          <div class="blanch-preview-wrap">
+            <canvas id="blanch-roi-preview" class="blanch-roi-preview" width="72" height="72"></canvas>
+            <span id="blanch-state-pill" class="blanch-state-pill">IDLE</span>
+          </div>
+
+          <div class="blanch-metrics">
+            <div class="blanch-metric-row">
+              <span class="blanch-metric-label">SCORE</span>
+              <span id="blanch-score-val" class="blanch-metric-val">0.00</span>
+              <span class="blanch-metric-sub">/ TH <span id="blanch-th-display">3.5</span></span>
+            </div>
+            <div class="blanch-bar-track">
+              <div id="blanch-bar-fill" class="blanch-bar-fill"></div>
+              <div id="blanch-bar-off-marker" class="blanch-bar-marker off"></div>
+              <div id="blanch-bar-on-marker" class="blanch-bar-marker on"></div>
+            </div>
+            <div class="blanch-metric-row blanch-sub-row">
+              <span class="blanch-metric-label">Δa*</span>
+              <span id="blanch-da-val" class="blanch-metric-val">0.00</span>
+              <span class="blanch-metric-label">ΔL*</span>
+              <span id="blanch-dl-val" class="blanch-metric-val">0.00</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="blanch-sliders">
+          <label class="blanch-slider-row">
+            <span class="blanch-slider-label">TH</span>
+            <input type="range" id="blanch-th-slider" min="0.5" max="12.0" step="0.1" value="3.5" />
+            <span id="blanch-th-val" class="blanch-slider-val">3.5</span>
+          </label>
+          <label class="blanch-slider-row">
+            <span class="blanch-slider-label">ROI</span>
+            <input type="range" id="blanch-roi-slider" min="16" max="48" step="4" value="24" />
+            <span id="blanch-roi-val" class="blanch-slider-val">24px</span>
+          </label>
+          <label class="blanch-slider-row">
+            <span class="blanch-slider-label">EMA</span>
+            <input type="range" id="blanch-ema-slider" min="0.05" max="1.0" step="0.05" value="0.35" />
+            <span id="blanch-ema-val" class="blanch-slider-val">0.35</span>
+          </label>
+        </div>
+      </div>
+    </div>
+
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>
