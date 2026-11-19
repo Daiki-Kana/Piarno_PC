@@ -88,9 +88,41 @@ let showTrackingLines = (() => {
 // ==========================================================================
 // Web Audio API マラカス音響エンジン
 // ==========================================================================
+// WebAudioFont 実機マラカスサンプル ＆ Web Audio フォールバック音響エンジン
+// ==========================================================================
+const MARACAS_PRESET_URL =
+  "https://surikov.github.io/webaudiofontdata/sound/12870_0_FluidR3_GM_sf2_file.js";
+const MARACAS_PRESET_VAR = "_drum_70_0_FluidR3_GM_sf2_file";
+
 let audioCtx = null;
 let noiseBuffer = null;
 let maracasStrokeIndex = 0;
+let wafPlayer = null;
+let maracasPreset = null;
+let maracasClosedFilter = null;
+let isPresetLoading = false;
+
+/**
+ * WebAudioFont の Maracas (GM Drum Note 70) プリセットを非同期ロード
+ */
+function loadMaracasPreset(ctx) {
+  if (maracasPreset || isPresetLoading || !wafPlayer) return;
+  isPresetLoading = true;
+  try {
+    wafPlayer.loader.startLoad(ctx, MARACAS_PRESET_URL, MARACAS_PRESET_VAR);
+    wafPlayer.loader.waitLoad(() => {
+      const loaded = window[MARACAS_PRESET_VAR];
+      if (loaded) {
+        maracasPreset = loaded;
+        console.log("[AUDIO] WebAudioFont Maracas サンプルのロードが完了しました");
+      }
+      isPresetLoading = false;
+    });
+  } catch (err) {
+    console.warn("[AUDIO] WebAudioFont ロード失敗、フォールバック合成を使用します:", err);
+    isPresetLoading = false;
+  }
+}
 
 /**
  * AudioContext をユーザー操作コンテキスト内で初期化・再開
@@ -105,8 +137,16 @@ function ensureAudioContext() {
   if (audioCtx && audioCtx.state === "suspended") {
     audioCtx.resume().catch(() => {});
   }
+  if (audioCtx && !wafPlayer && typeof window.WebAudioFontPlayer === "function") {
+    wafPlayer = new window.WebAudioFontPlayer();
+    maracasClosedFilter = audioCtx.createBiquadFilter();
+    maracasClosedFilter.type = "lowpass";
+    maracasClosedFilter.frequency.setValueAtTime(2600, audioCtx.currentTime);
+    maracasClosedFilter.connect(audioCtx.destination);
+    loadMaracasPreset(audioCtx);
+  }
   if (audioCtx && !noiseBuffer) {
-    // 0.25秒分のホワイトノイズバッファを事前生成して再利用
+    // サンプルロード前用の0.25秒ホワイトノイズバッファを事前生成
     const length = Math.floor(audioCtx.sampleRate * 0.25);
     noiseBuffer = audioCtx.createBuffer(1, length, audioCtx.sampleRate);
     const data = noiseBuffer.getChannelData(0);
@@ -118,55 +158,85 @@ function ensureAudioContext() {
 }
 
 /**
- * マラカス（シェイカー）音を発音する
- * @param {number} intensity 振りの強さ (0.25〜1.0)
- * @param {boolean} isOpen パー（true: 高い音） / グー（false: 低めの音）
+ * 粒の擦れ・シャリ感を補う高域シェイカーレイヤーを再生
  */
-function playMaracasSound(intensity = 0.7, isOpen = true) {
-  const ctx = ensureAudioContext();
-  if (!ctx || !noiseBuffer) return;
+function playShakerGrainLayer(ctx, clamped, isOpen, delaySec = 0, gainScale = 0.28) {
+  if (!noiseBuffer) return;
 
-  const now = ctx.currentTime;
-  const clamped = Math.min(1.0, Math.max(0.2, intensity));
-  const isUpStroke = maracasStrokeIndex % 2 === 1;
-  maracasStrokeIndex++;
-
+  const startAt = ctx.currentTime + delaySec;
   const src = ctx.createBufferSource();
   src.buffer = noiseBuffer;
 
-  // パー時は高域中心、グー時は低〜中域中心に帯域を分離
   const hpFilter = ctx.createBiquadFilter();
   hpFilter.type = "highpass";
   hpFilter.frequency.setValueAtTime(
-    isOpen ? 3400 + clamped * 900 : 750 + clamped * 350,
-    now
+    isOpen ? 4600 + clamped * 1000 : 1400 + clamped * 500,
+    startAt
   );
 
   const bpFilter = ctx.createBiquadFilter();
   bpFilter.type = "bandpass";
-  const baseFreq = isOpen
-    ? (isUpStroke ? 6600 : 5800) + clamped * 1200
-    : (isUpStroke ? 2100 : 1750) + clamped * 500;
-  bpFilter.frequency.setValueAtTime(baseFreq, now);
-  bpFilter.Q.setValueAtTime(isOpen ? 1.4 : 1.8, now);
+  bpFilter.frequency.setValueAtTime(
+    isOpen ? 6800 + clamped * 1400 : 2500 + clamped * 700,
+    startAt
+  );
+  bpFilter.Q.setValueAtTime(isOpen ? 1.1 : 1.4, startAt);
 
   const gainNode = ctx.createGain();
-  const peakGain = (isOpen ? 0.30 : 0.38) + clamped * 0.65;
-  const decaySec = (isOpen ? 0.05 : 0.07) + clamped * 0.045;
+  const peakGain = gainScale * (0.45 + clamped * 0.55);
+  const decaySec = (isOpen ? 0.065 : 0.085) + clamped * 0.04;
 
-  // 粒が殻に当たる立ち上がり（2ms）と鋭い減衰
-  gainNode.gain.setValueAtTime(0.001, now);
-  gainNode.gain.linearRampToValueAtTime(peakGain, now + 0.002);
-  gainNode.gain.exponentialRampToValueAtTime(0.0001, now + decaySec);
+  // 10msのスウェルで「シュワッ」と粒が擦れる立ち上がりを作る
+  gainNode.gain.setValueAtTime(0.001, startAt);
+  gainNode.gain.linearRampToValueAtTime(peakGain, startAt + 0.01);
+  gainNode.gain.exponentialRampToValueAtTime(0.0001, startAt + decaySec);
 
   src.connect(hpFilter);
   hpFilter.connect(bpFilter);
   bpFilter.connect(gainNode);
   gainNode.connect(ctx.destination);
 
-  // 毎回バッファ内の少し異なる位置から再生して自然な揺らぎを作る
-  const offset = Math.random() * 0.05;
-  src.start(now, offset, decaySec + 0.02);
+  src.start(startAt, Math.random() * 0.05, decaySec + 0.02);
+}
+
+/**
+ * ロード前・オフライン時のフォールバック合成マラカス音
+ */
+function playMaracasSynthFallback(ctx, clamped, isOpen) {
+  playShakerGrainLayer(ctx, clamped, isOpen, 0, 0.75);
+  playShakerGrainLayer(ctx, clamped, isOpen, 0.024, 0.42);
+}
+
+/**
+ * マラカス音を発音する（WebAudioFont実機サンプル＋粒跳ね返り＋高域シャカ感）
+ * @param {number} intensity 振りの強さ (0.25〜1.0)
+ * @param {boolean} isOpen パー（true: 高い音） / グー（false: 低めの音）
+ */
+function playMaracasSound(intensity = 0.7, isOpen = true) {
+  const ctx = ensureAudioContext();
+  if (!ctx) return;
+
+  const clamped = Math.min(1.0, Math.max(0.2, intensity));
+
+  if (maracasPreset && wafPlayer) {
+    try {
+      const now = ctx.currentTime;
+      const basePitch = isOpen ? 75 : 64;
+      const targetNode = isOpen || !maracasClosedFilter ? ctx.destination : maracasClosedFilter;
+      const volume = Math.min(1.0, 0.45 + clamped * 0.55);
+
+      // 1打目（主音）＋ 24ms後の2打目（粒の跳ね返り）でシャカシャカ感を演出
+      wafPlayer.queueWaveTable(ctx, targetNode, maracasPreset, now, basePitch, 0.35, volume);
+      wafPlayer.queueWaveTable(ctx, targetNode, maracasPreset, now + 0.024, basePitch + 2, 0.25, volume * 0.45);
+      // 粒の擦れる高域シャリ感を薄くブレンド
+      playShakerGrainLayer(ctx, clamped, isOpen, 0, isOpen ? 0.34 : 0.24);
+      return;
+    } catch (err) {
+      console.warn("[AUDIO] WebAudioFont 再生エラー、フォールバック使用:", err);
+    }
+  }
+
+  playMaracasSynthFallback(ctx, clamped, isOpen);
 }
 
 // ==========================================================================
@@ -188,14 +258,11 @@ const createMaracasHandState = () => ({
   lostFrames: 0
 });
 
-const maracasHands = {
-  Left: createMaracasHandState(),
-  Right: createMaracasHandState()
-};
+const maracasSlots = [createMaracasHandState(), createMaracasHandState()];
 const shakeRipples = [];
 
 /**
- * 指定した手（または全手）のマラカス検知状態をリセット
+ * 指定した手スロットのマラカス検知状態をリセット
  */
 function resetMaracasHandState(handState) {
   handState.prevCenter = null;
@@ -206,10 +273,10 @@ function resetMaracasHandState(handState) {
 }
 
 function resetAllMaracasStates() {
-  resetMaracasHandState(maracasHands.Left);
-  resetMaracasHandState(maracasHands.Right);
-  maracasHands.Left.lostFrames = 0;
-  maracasHands.Right.lostFrames = 0;
+  for (const slot of maracasSlots) {
+    resetMaracasHandState(slot);
+    slot.lostFrames = 0;
+  }
 }
 
 /**
@@ -334,37 +401,71 @@ const HAND_CONNECTIONS = [
 ];
 
 const LOST_RESET_FRAMES = 4;
+const HAND_MATCH_MAX_DIST = 0.35;
 
 /**
- * 検出結果の判定・描画を行う（左手・右手の両手同時演奏対応）
+ * 検出結果の判定・描画を行う（位置連続性マッチングによる両手同時演奏対応）
  * @param {object} results
  */
 function processDetectionResults(results) {
   canvasCtx.clearRect(0, 0, canvas.width, canvas.height);
 
   const nowMs = performance.now();
-  const hands = results?.landmarks || [];
-  const handednesses = results?.handednesses || [];
+  const validHands = (results?.landmarks || []).filter((lm) => lm && lm.length >= 21).slice(0, 2);
   const width = canvas.width;
   const height = canvas.height;
-  const seenKeys = new Set();
+
+  // 各検出手の中心座標を算出
+  const handCenters = validHands.map((lm) => ({
+    x: (lm[0].x + lm[9].x) * 0.5,
+    y: (lm[0].y + lm[9].y) * 0.5
+  }));
+
+  // 前フレームの座標に近いスロットへ優先割り当て（Left/Rightラベル揺れによる状態混同を防止）
+  const assignedSlotForHand = new Array(validHands.length).fill(-1);
+  const usedSlots = new Set();
+
+  const pairs = [];
+  for (let hIdx = 0; hIdx < validHands.length; hIdx++) {
+    for (let sIdx = 0; sIdx < maracasSlots.length; sIdx++) {
+      const prev = maracasSlots[sIdx].prevCenter;
+      if (!prev) continue;
+      const dist = Math.hypot(handCenters[hIdx].x - prev.x, handCenters[hIdx].y - prev.y);
+      if (dist <= HAND_MATCH_MAX_DIST) {
+        pairs.push({ hIdx, sIdx, dist });
+      }
+    }
+  }
+  pairs.sort((a, b) => a.dist - b.dist);
+
+  for (const { hIdx, sIdx } of pairs) {
+    if (assignedSlotForHand[hIdx] !== -1 || usedSlots.has(sIdx)) continue;
+    assignedSlotForHand[hIdx] = sIdx;
+    usedSlots.add(sIdx);
+  }
+
+  // 未割り当ての手を空きスロットへ割り当て
+  for (let hIdx = 0; hIdx < validHands.length; hIdx++) {
+    if (assignedSlotForHand[hIdx] !== -1) continue;
+    for (let sIdx = 0; sIdx < maracasSlots.length; sIdx++) {
+      if (!usedSlots.has(sIdx)) {
+        resetMaracasHandState(maracasSlots[sIdx]);
+        assignedSlotForHand[hIdx] = sIdx;
+        usedSlots.add(sIdx);
+        break;
+      }
+    }
+  }
 
   let anyShook = false;
   let anyOpen = false;
 
-  for (let i = 0; i < hands.length; i++) {
-    const rawLm = hands[i];
-    if (!rawLm || rawLm.length < 21) continue;
+  for (let hIdx = 0; hIdx < validHands.length; hIdx++) {
+    const sIdx = assignedSlotForHand[hIdx];
+    if (sIdx === -1) continue;
 
-    // handedness が重複または未取得の場合は空いているスロットへ割り当て
-    let handKey = handednesses[i]?.[0]?.categoryName === "Left" ? "Left" : "Right";
-    if (seenKeys.has(handKey)) {
-      handKey = handKey === "Left" ? "Right" : "Left";
-    }
-    if (seenKeys.has(handKey)) continue;
-
-    seenKeys.add(handKey);
-    const handState = maracasHands[handKey];
+    const rawLm = validHands[hIdx];
+    const handState = maracasSlots[sIdx];
     handState.lostFrames = 0;
 
     const pxLm = rawLm.map((pt) => ({
@@ -381,10 +482,10 @@ function processDetectionResults(results) {
     }
   }
 
-  // 未検出だった手側の状態をロスト猶予後にリセット
-  for (const key of ["Left", "Right"]) {
-    if (!seenKeys.has(key)) {
-      const handState = maracasHands[key];
+  // 未割り当てスロットのロスト処理
+  for (let sIdx = 0; sIdx < maracasSlots.length; sIdx++) {
+    if (!usedSlots.has(sIdx)) {
+      const handState = maracasSlots[sIdx];
       handState.lostFrames++;
       if (handState.lostFrames >= LOST_RESET_FRAMES) {
         resetMaracasHandState(handState);
@@ -393,7 +494,7 @@ function processDetectionResults(results) {
   }
 
   if (telemetryMode) {
-    if (seenKeys.size === 0) {
+    if (usedSlots.size === 0) {
       telemetryMode.textContent = "IDLE";
     } else {
       telemetryMode.textContent = anyShook ? "SHAKE" : anyOpen ? "OPEN" : "CLOSED";
@@ -570,8 +671,8 @@ async function ensureMediaPipeEngine() {
         baseOptions: { modelAssetPath: modelPath, delegate: "GPU" },
         runningMode: "VIDEO",
         numHands: 2,
-        minHandDetectionConfidence: 0.4,
-        minHandPresenceConfidence: 0.4,
+        minHandDetectionConfidence: 0.35,
+        minHandPresenceConfidence: 0.35,
         minTrackingConfidence: 0.3
       });
       mediaPipeDelegateLabel = "MP-GPU";
@@ -583,8 +684,8 @@ async function ensureMediaPipeEngine() {
           baseOptions: { modelAssetPath: modelPath, delegate: "CPU" },
           runningMode: "VIDEO",
           numHands: 2,
-          minHandDetectionConfidence: 0.4,
-          minHandPresenceConfidence: 0.4,
+          minHandDetectionConfidence: 0.35,
+          minHandPresenceConfidence: 0.35,
           minTrackingConfidence: 0.3
         });
         mediaPipeDelegateLabel = "MP-CPU";
