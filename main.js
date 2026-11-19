@@ -13,7 +13,7 @@ import { createHandpose } from "@svenflow/micro-handpose";
 // ==========================================================================
 const video = document.getElementById("webcam");
 const canvas = document.getElementById("output-canvas");
-const canvasCtx = canvas.getContext("2d");
+const canvasCtx = canvas.getContext("2d", { alpha: true, desynchronized: true });
 const startModal = document.getElementById("start-modal");
 const startPlayBtn = document.getElementById("start-play-btn");
 const startPlayText = document.getElementById("start-play-text");
@@ -45,6 +45,10 @@ const PC_TRACKING_LINE_STORAGE_KEY = "maracas_pc_tracking_line_v2";
 
 const MAX_APP_FPS = 60;
 const MIN_APP_DISPATCH_INTERVAL_MS = 10.0;
+const isMobileDevice =
+  /iPhone|iPad|iPod|Android/i.test(navigator.userAgent) ||
+  (navigator.maxTouchPoints > 1 && window.innerWidth <= 1024);
+const isDebugMode = new URLSearchParams(window.location.search).get("debug") === "1";
 
 let currentCameraId = (() => {
   try {
@@ -339,15 +343,15 @@ function isOpenPalm(lm) {
  * @param {number} nowMs
  * @returns {{ isOpen: boolean, shook: boolean, centerPx: {x: number, y: number} }}
  */
-function evaluateMaracasShake(handState, lm, pxLm, nowMs) {
+function evaluateMaracasShake(handState, lm, width, height, nowMs) {
   const isOpen = isOpenPalm(lm);
   const centerNorm = {
     x: (lm[0].x + lm[9].x) * 0.5,
     y: (lm[0].y + lm[9].y) * 0.5
   };
   const centerPx = {
-    x: (pxLm[0].x + pxLm[9].x) * 0.5,
-    y: (pxLm[0].y + pxLm[9].y) * 0.5
+    x: centerNorm.x * width,
+    y: centerNorm.y * height
   };
 
   // 手の基準長（手首〜中指付け根）でカメラ距離によるスケール差を正規化
@@ -433,14 +437,13 @@ const HAND_CONNECTIONS = [
 
 const LOST_RESET_FRAMES = 4;
 const HAND_MATCH_MAX_DIST = 0.35;
+let isCanvasDirty = false;
 
 /**
  * 検出結果の判定・描画を行う（位置連続性マッチングによる両手同時演奏対応）
  * @param {object} results
  */
 function processDetectionResults(results) {
-  canvasCtx.clearRect(0, 0, canvas.width, canvas.height);
-
   const nowMs = performance.now();
   const validHands = (results?.landmarks || []).filter((lm) => lm && lm.length >= 21).slice(0, 2);
   const width = canvas.width;
@@ -490,6 +493,7 @@ function processDetectionResults(results) {
 
   let anyShook = false;
   let anyOpen = false;
+  const drawSkeletonList = showTrackingLines ? [] : null;
 
   for (let hIdx = 0; hIdx < validHands.length; hIdx++) {
     const sIdx = assignedSlotForHand[hIdx];
@@ -499,18 +503,12 @@ function processDetectionResults(results) {
     const handState = maracasSlots[sIdx];
     handState.lostFrames = 0;
 
-    const pxLm = rawLm.map((pt) => ({
-      x: pt.x * width,
-      y: pt.y * height
-    }));
-
-    const { isOpen, shook, centerPx } = evaluateMaracasShake(handState, rawLm, pxLm, nowMs);
+    const { isOpen, shook, centerPx } = evaluateMaracasShake(handState, rawLm, width, height, nowMs);
     if (shook) anyShook = true;
     if (isOpen) anyOpen = true;
 
-    if (showTrackingLines) {
-      // グー（演奏状態）を白ハイライト、パー（待機状態）を半透明グレーで描画
-      drawHandSkeleton(pxLm, centerPx, !isOpen);
+    if (drawSkeletonList) {
+      drawSkeletonList.push({ rawLm, centerPx, isActive: !isOpen });
     }
   }
 
@@ -525,7 +523,7 @@ function processDetectionResults(results) {
     }
   }
 
-  if (telemetryMode) {
+  if (isDebugMode && telemetryMode) {
     if (usedSlots.size === 0) {
       telemetryMode.textContent = "IDLE";
     } else {
@@ -533,40 +531,60 @@ function processDetectionResults(results) {
     }
   }
 
-  renderRipples();
+  // 描画要素がないフレームはクリア・再描画を完全スキップ（iOS Safari のGPU再合成負荷を削減）
+  const hasDrawWork =
+    (drawSkeletonList && drawSkeletonList.length > 0) ||
+    shakeRipples.length > 0 ||
+    shakeParticles.length > 0;
+
+  if (hasDrawWork) {
+    canvasCtx.clearRect(0, 0, width, height);
+    if (drawSkeletonList) {
+      for (const item of drawSkeletonList) {
+        drawHandSkeleton(item.rawLm, width, height, item.centerPx, item.isActive);
+      }
+    }
+    renderRipples();
+    isCanvasDirty = true;
+  } else if (isCanvasDirty) {
+    canvasCtx.clearRect(0, 0, width, height);
+    isCanvasDirty = false;
+  }
 }
 
 /**
- * 手の骨格と手のひら中心マーカーを描画
- * @param {Array<{x: number, y: number}>} pts
+ * 手の骨格と手のひら中心マーカーを描画（中間配列を生成せず直接描画）
+ * @param {Array<{x: number, y: number}>} rawLm
+ * @param {number} width
+ * @param {number} height
  * @param {{x: number, y: number}} centerPx
- * @param {boolean} isOpen
+ * @param {boolean} isActive
  */
-function drawHandSkeleton(pts, centerPx, isOpen) {
+function drawHandSkeleton(rawLm, width, height, centerPx, isActive) {
   canvasCtx.save();
   canvasCtx.lineCap = "round";
   canvasCtx.lineJoin = "round";
-  canvasCtx.strokeStyle = isOpen ? "rgba(255, 255, 255, 0.85)" : "rgba(255, 255, 255, 0.28)";
-  canvasCtx.lineWidth = isOpen ? 2.5 : 1.5;
+  canvasCtx.strokeStyle = isActive ? "rgba(255, 255, 255, 0.85)" : "rgba(255, 255, 255, 0.28)";
+  canvasCtx.lineWidth = isActive ? 2.5 : 1.5;
 
   canvasCtx.beginPath();
   for (const [a, b] of HAND_CONNECTIONS) {
-    canvasCtx.moveTo(pts[a].x, pts[a].y);
-    canvasCtx.lineTo(pts[b].x, pts[b].y);
+    canvasCtx.moveTo(rawLm[a].x * width, rawLm[a].y * height);
+    canvasCtx.lineTo(rawLm[b].x * width, rawLm[b].y * height);
   }
   canvasCtx.stroke();
 
-  canvasCtx.fillStyle = isOpen ? "#ffffff" : "rgba(255, 255, 255, 0.35)";
-  for (const pt of pts) {
+  canvasCtx.fillStyle = isActive ? "#ffffff" : "rgba(255, 255, 255, 0.35)";
+  for (let i = 0; i < rawLm.length; i++) {
     canvasCtx.beginPath();
-    canvasCtx.arc(pt.x, pt.y, 3.0, 0, Math.PI * 2);
+    canvasCtx.arc(rawLm[i].x * width, rawLm[i].y * height, 3.0, 0, Math.PI * 2);
     canvasCtx.fill();
   }
 
   // 手のひら中心マーカー
   canvasCtx.beginPath();
   canvasCtx.arc(centerPx.x, centerPx.y, 6.0, 0, Math.PI * 2);
-  canvasCtx.strokeStyle = isOpen ? "#ffffff" : "rgba(255, 255, 255, 0.35)";
+  canvasCtx.strokeStyle = isActive ? "#ffffff" : "rgba(255, 255, 255, 0.35)";
   canvasCtx.lineWidth = 2.0;
   canvasCtx.stroke();
 
@@ -646,6 +664,7 @@ let isInferringFrame = false;
 let pendingVideoFrameTime = null;
 let lastVideoTimestamp = -1;
 let lastVideoTime = -1;
+let lastProcessedVideoTime = -1;
 let lastAppProcessedTime = 0;
 
 let appFrameCount = 0;
@@ -857,7 +876,7 @@ async function startCamera(deviceId = null, isManualSelect = false) {
     /integrated|built-in|facetime|internal/i.test(label);
 
   let preferredDeviceId = deviceId;
-  if (!isManualSelect && navigator.mediaDevices?.enumerateDevices) {
+  if (!isMobileDevice && !isManualSelect && navigator.mediaDevices?.enumerateDevices) {
     try {
       const devices = await navigator.mediaDevices.enumerateDevices();
       const videoInputs = devices.filter((d) => d.kind === "videoinput" && d.deviceId);
@@ -871,6 +890,20 @@ async function startCamera(deviceId = null, isManualSelect = false) {
   }
 
   const buildConstraints = (targetDeviceId) => {
+    if (isMobileDevice) {
+      // スマホは推論・GPU転送負荷を下げるため 640x480 前後を最優先（インカメラ優先）
+      const base = targetDeviceId
+        ? { deviceId: { exact: targetDeviceId } }
+        : { facingMode: { ideal: "user" } };
+      return [
+        { video: { ...base, width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 60, max: 60, min: 30 } }, audio: false },
+        { video: { ...base, width: { ideal: 640 }, height: { ideal: 480 } }, audio: false },
+        { video: { ...base, width: { ideal: 480 }, height: { ideal: 360 } }, audio: false },
+        { video: targetDeviceId ? { deviceId: { exact: targetDeviceId } } : { facingMode: "user" }, audio: false },
+        { video: true, audio: false }
+      ];
+    }
+
     const base = targetDeviceId ? { deviceId: { exact: targetDeviceId } } : {};
     return [
       { video: { ...base, width: { exact: 1024 }, height: { exact: 576 }, frameRate: { ideal: 60, max: 60, min: 50 } }, audio: false },
@@ -906,7 +939,7 @@ async function startCamera(deviceId = null, isManualSelect = false) {
   }
 
   const initialTrack = stream.getVideoTracks()[0];
-  if (!isManualSelect && initialTrack && isBuiltInCameraLabel(initialTrack.label) && navigator.mediaDevices?.enumerateDevices) {
+  if (!isMobileDevice && !isManualSelect && initialTrack && isBuiltInCameraLabel(initialTrack.label) && navigator.mediaDevices?.enumerateDevices) {
     try {
       const devices = await navigator.mediaDevices.enumerateDevices();
       const externalCam = devices.find(
@@ -941,7 +974,7 @@ async function startCamera(deviceId = null, isManualSelect = false) {
             localStorage.setItem(PC_CAMERA_STORAGE_KEY, currentCameraId);
           } catch {}
         }
-        if (telemetryRes && settings.width && settings.height) {
+        if (isDebugMode && telemetryRes && settings.width && settings.height) {
           telemetryRes.textContent = `${settings.width}×${settings.height}`;
         }
       }
@@ -966,8 +999,11 @@ async function startCamera(deviceId = null, isManualSelect = false) {
   appFrameCount = 0;
   camFrameCount = 0;
   lastPresentedFrames = -1;
+  lastVideoTime = -1;
+  lastProcessedVideoTime = -1;
   lastAppProcessedTime = 0;
   isInferringFrame = false;
+  isCanvasDirty = false;
   pendingVideoFrameTime = null;
   lastAppFpsTime = performance.now();
   lastCamFpsTime = performance.now();
@@ -977,7 +1013,9 @@ async function startCamera(deviceId = null, isManualSelect = false) {
   }
 
   isPredicting = true;
-  scheduleCameraFpsMonitor();
+  if (isDebugMode) {
+    scheduleCameraFpsMonitor();
+  }
   schedulePredictLoop();
 }
 
@@ -985,8 +1023,8 @@ function updateCanvasResolution() {
   if (video.videoWidth && video.videoHeight) {
     const aspect = video.videoWidth / video.videoHeight;
     document.documentElement.style.setProperty("--video-aspect", aspect.toFixed(4));
-    // モバイルの2D描画負荷を抑えるため、表示Canvasの内部解像度は長辺最大640pxに制限
-    const maxDrawDim = 640;
+    // モバイルの2D描画・GPU合成負荷を抑えるため、Canvasの内部解像度をスマホ480px・PC640px上限に制限
+    const maxDrawDim = isMobileDevice ? 480 : 640;
     let targetW = video.videoWidth;
     let targetH = video.videoHeight;
     if (Math.max(targetW, targetH) > maxDrawDim) {
@@ -997,6 +1035,7 @@ function updateCanvasResolution() {
     if (canvas.width !== targetW || canvas.height !== targetH) {
       canvas.width = targetW;
       canvas.height = targetH;
+      isCanvasDirty = false;
     }
   }
 }
@@ -1025,7 +1064,7 @@ async function processVideoFrame(frameTime) {
     const timestampMs = Math.max(now, lastVideoTimestamp + 1.0);
     lastVideoTimestamp = timestampMs;
 
-    const startTime = performance.now();
+    const startTime = isDebugMode ? performance.now() : 0;
     let results = { landmarks: [] };
 
     if (activeTrackingEngine === "MICRO_HANDPOSE" && microHandpose) {
@@ -1043,13 +1082,15 @@ async function processVideoFrame(frameTime) {
       results = handLandmarker.detectForVideo(video, timestampMs);
     }
 
-    const calcDuration = performance.now() - startTime;
-    if (telemetryMs) {
+    if (isDebugMode && telemetryMs) {
+      const calcDuration = performance.now() - startTime;
       telemetryMs.textContent = `${calcDuration.toFixed(1)} ms`;
     }
 
     processDetectionResults(results);
-    updateAppFps();
+    if (isDebugMode) {
+      updateAppFps();
+    }
   } catch (err) {
     console.warn("[INFERENCE] フレーム推論エラー:", err);
   } finally {
@@ -1058,13 +1099,13 @@ async function processVideoFrame(frameTime) {
 }
 
 /**
- * カメラ供給FPSの独立計測（推論ループと切り離して実供給FPSを正確に計測）
+ * カメラ供給FPSの独立計測（?debug=1 時のみ稼働）
  */
 function scheduleCameraFpsMonitor() {
-  if (!isPredicting) return;
+  if (!isPredicting || !isDebugMode) return;
   if ("requestVideoFrameCallback" in HTMLVideoElement.prototype) {
     video.requestVideoFrameCallback((_, metadata) => {
-      if (!isPredicting) return;
+      if (!isPredicting || !isDebugMode) return;
       updateCameraFps(performance.now(), metadata?.presentedFrames);
       scheduleCameraFpsMonitor();
     });
@@ -1072,8 +1113,9 @@ function scheduleCameraFpsMonitor() {
 }
 
 /**
- * 本家デモ同様の requestAnimationFrame 直列推論ループ
- * （await 完了後に次フレームを予約することでフレームペーシングの乱れを防止）
+ * requestAnimationFrame 直列推論ループ
+ * - 同一カメラフレームに対する重複推論を防止（video.currentTime が更新された時のみ推論）
+ * - 推論スキップ中も発音エフェクトが残っていれば滑らかに描画継続
  */
 function schedulePredictLoop() {
   if (!isPredicting) return;
@@ -1081,12 +1123,26 @@ function schedulePredictLoop() {
   requestAnimationFrame(async (now) => {
     if (!isPredicting) return;
     if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
-      if (!("requestVideoFrameCallback" in HTMLVideoElement.prototype) && video.currentTime !== lastVideoTime) {
-        lastVideoTime = video.currentTime;
+      const currentVideoTime = video.currentTime;
+      if (isDebugMode && !("requestVideoFrameCallback" in HTMLVideoElement.prototype) && currentVideoTime !== lastVideoTime) {
+        lastVideoTime = currentVideoTime;
         updateCameraFps(performance.now());
       }
-      if (shouldRunAppFrame(performance.now())) {
+
+      const hasNewVideoFrame = currentVideoTime !== lastProcessedVideoTime;
+      if (hasNewVideoFrame && shouldRunAppFrame(performance.now())) {
+        lastProcessedVideoTime = currentVideoTime;
         await processVideoFrame(now);
+      } else if (!showTrackingLines) {
+        // カメラ未更新フレームでも発音エフェクト（リップル／パーティクル）は滑らかに更新
+        if (shakeRipples.length > 0 || shakeParticles.length > 0) {
+          canvasCtx.clearRect(0, 0, canvas.width, canvas.height);
+          renderRipples();
+          isCanvasDirty = true;
+        } else if (isCanvasDirty) {
+          canvasCtx.clearRect(0, 0, canvas.width, canvas.height);
+          isCanvasDirty = false;
+        }
       }
     }
     schedulePredictLoop();
@@ -1179,7 +1235,6 @@ async function handleStartPlay() {
 
 function initApp() {
   // デバッグテレメトリは ?debug=1 指定時のみ表示（通常は非表示）
-  const isDebugMode = new URLSearchParams(window.location.search).get("debug") === "1";
   if (telemetryPill) {
     telemetryPill.classList.toggle("hidden", !isDebugMode);
   }
