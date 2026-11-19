@@ -32,14 +32,15 @@ body {
   background-color: #000000;
 }
 
-/* ビデオコンテナ：アスペクト比を維持したまま画面領域へ最大拡大 */
+/* ビデオコンテナ：画面全体へフルスクリーン表示 */
 .video-container {
   position: relative;
   display: block;
-  width: min(100vw, calc(100vh * var(--video-aspect, 1.3333)));
-  height: min(100vh, calc(100vw / var(--video-aspect, 1.3333)));
-  width: min(100dvw, calc(100dvh * var(--video-aspect, 1.3333)));
-  height: min(100dvh, calc(100dvw / var(--video-aspect, 1.3333)));
+  width: 100vw;
+  height: 100vh;
+  width: 100dvw;
+  height: 100dvh;
+  overflow: hidden;
   line-height: 0;
 }
 
@@ -47,7 +48,7 @@ body {
   display: block;
   width: 100%;
   height: 100%;
-  object-fit: fill;
+  object-fit: cover;
 }
 
 #webcam.mirrored {
@@ -60,6 +61,7 @@ body {
   left: 0;
   width: 100%;
   height: 100%;
+  object-fit: cover;
   pointer-events: none;
 }
 
@@ -87,6 +89,10 @@ body {
   z-index: 260;
   pointer-events: none;
   font-variant-numeric: tabular-nums;
+}
+
+.pc-telemetry-pill.hidden {
+  display: none;
 }
 
 .telemetry-fps {

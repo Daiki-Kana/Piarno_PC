@@ -18,6 +18,7 @@ const startModal = document.getElementById("start-modal");
 const startPlayBtn = document.getElementById("start-play-btn");
 const startPlayText = document.getElementById("start-play-text");
 
+const telemetryPill = document.getElementById("pc-telemetry-pill");
 const telemetryCamFps = document.getElementById("telemetry-cam-fps");
 const telemetryAppFps = document.getElementById("telemetry-app-fps");
 const telemetryRes = document.getElementById("telemetry-res");
@@ -177,25 +178,38 @@ const SHAKE_MIN_STROKE_DIST = 0.12;     // 誤爆防止の最小下移動距離�
 const SHAKE_MIN_PALM_SCALE_RATIO = 0.97;// カメラから遠ざかる後ろ引きを弾くサイズ維持率
 const SHAKE_COOLDOWN_MS = 200;          // 連続誤爆を防ぐ無検知時間（ms）
 
-const maracasState = {
+const createMaracasHandState = () => ({
   prevCenter: null,
   prevTimeMs: null,
   prevPalmSize: null,
   downStrokeDist: 0,
   canTrigger: true,
   lastHitTimeMs: 0,
-  ripples: []
+  lostFrames: 0
+});
+
+const maracasHands = {
+  Left: createMaracasHandState(),
+  Right: createMaracasHandState()
 };
+const shakeRipples = [];
 
 /**
- * マラカス検知状態をリセット
+ * 指定した手（または全手）のマラカス検知状態をリセット
  */
-function resetMaracasState() {
-  maracasState.prevCenter = null;
-  maracasState.prevTimeMs = null;
-  maracasState.prevPalmSize = null;
-  maracasState.downStrokeDist = 0;
-  maracasState.canTrigger = true;
+function resetMaracasHandState(handState) {
+  handState.prevCenter = null;
+  handState.prevTimeMs = null;
+  handState.prevPalmSize = null;
+  handState.downStrokeDist = 0;
+  handState.canTrigger = true;
+}
+
+function resetAllMaracasStates() {
+  resetMaracasHandState(maracasHands.Left);
+  resetMaracasHandState(maracasHands.Right);
+  maracasHands.Left.lostFrames = 0;
+  maracasHands.Right.lostFrames = 0;
 }
 
 /**
@@ -231,7 +245,7 @@ function isOpenPalm(lm) {
  * @param {number} nowMs
  * @returns {{ isOpen: boolean, shook: boolean, centerPx: {x: number, y: number} }}
  */
-function evaluateMaracasShake(lm, pxLm, nowMs) {
+function evaluateMaracasShake(handState, lm, pxLm, nowMs) {
   const isOpen = isOpenPalm(lm);
   const centerNorm = {
     x: (lm[0].x + lm[9].x) * 0.5,
@@ -245,68 +259,63 @@ function evaluateMaracasShake(lm, pxLm, nowMs) {
   // 手の基準長（手首〜中指付け根）でカメラ距離によるスケール差を正規化
   const palmSize = Math.max(0.04, Math.hypot(lm[9].x - lm[0].x, lm[9].y - lm[0].y));
 
-  if (maracasState.prevCenter === null || maracasState.prevTimeMs === null) {
-    maracasState.prevCenter = centerNorm;
-    maracasState.prevTimeMs = nowMs;
-    maracasState.prevPalmSize = palmSize;
-    if (telemetryMode) telemetryMode.textContent = isOpen ? "OPEN" : "CLOSED";
+  if (handState.prevCenter === null || handState.prevTimeMs === null) {
+    handState.prevCenter = centerNorm;
+    handState.prevTimeMs = nowMs;
+    handState.prevPalmSize = palmSize;
     return { isOpen, shook: false, centerPx };
   }
 
-  const dt = Math.max((nowMs - maracasState.prevTimeMs) / 1000, 1 / 240);
-  const deltaDownNorm = (centerNorm.y - maracasState.prevCenter.y) / palmSize;
+  const dt = Math.max((nowMs - handState.prevTimeMs) / 1000, 1 / 240);
+  const deltaDownNorm = (centerNorm.y - handState.prevCenter.y) / palmSize;
   // Y軸下方向（上から下への振り下ろし）の正規化速度を算出
   const downSpeed = deltaDownNorm / dt;
 
   // 下向きに連続移動した距離を累積し、上向きに戻ったらリセット
   if (deltaDownNorm > 0) {
-    maracasState.downStrokeDist += deltaDownNorm;
+    handState.downStrokeDist += deltaDownNorm;
   } else {
-    maracasState.downStrokeDist = 0;
+    handState.downStrokeDist = 0;
   }
 
   // カメラから遠ざかる後ろ引き（手の見かけサイズ縮小）をブロック
   const isNotRetreating =
-    maracasState.prevPalmSize === null ||
-    palmSize >= maracasState.prevPalmSize * SHAKE_MIN_PALM_SCALE_RATIO;
+    handState.prevPalmSize === null ||
+    palmSize >= handState.prevPalmSize * SHAKE_MIN_PALM_SCALE_RATIO;
 
-  maracasState.prevCenter = centerNorm;
-  maracasState.prevTimeMs = nowMs;
-  maracasState.prevPalmSize = palmSize;
+  handState.prevCenter = centerNorm;
+  handState.prevTimeMs = nowMs;
+  handState.prevPalmSize = palmSize;
 
-  if (!maracasState.canTrigger && downSpeed < SHAKE_RESET_SPEED_TH) {
-    maracasState.canTrigger = true;
+  if (!handState.canTrigger && downSpeed < SHAKE_RESET_SPEED_TH) {
+    handState.canTrigger = true;
   }
 
   let shook = false;
-  const isInCooldown = nowMs - maracasState.lastHitTimeMs < SHAKE_COOLDOWN_MS;
+  const isInCooldown = nowMs - handState.lastHitTimeMs < SHAKE_COOLDOWN_MS;
   // 振り始めの加速立ち上がり（サイズ維持＋最小ストローク長達成時）で即座に発音
   if (
-    maracasState.canTrigger &&
+    handState.canTrigger &&
     !isInCooldown &&
     isNotRetreating &&
-    maracasState.downStrokeDist >= SHAKE_MIN_STROKE_DIST &&
+    handState.downStrokeDist >= SHAKE_MIN_STROKE_DIST &&
     downSpeed >= SHAKE_TRIGGER_SPEED_TH
   ) {
     const intensity = Math.min(1.0, Math.max(0.35, (downSpeed - 2.0) / 5.5));
     playMaracasSound(intensity, isOpen);
-    maracasState.canTrigger = false;
-    maracasState.downStrokeDist = 0;
-    maracasState.lastHitTimeMs = nowMs;
+    handState.canTrigger = false;
+    handState.downStrokeDist = 0;
+    handState.lastHitTimeMs = nowMs;
     shook = true;
 
     // 波紋ビジュアルエフェクトを追加
-    maracasState.ripples.push({
+    shakeRipples.push({
       x: centerPx.x,
       y: centerPx.y,
       radius: 14,
       maxRadius: 56 + intensity * 44,
       alpha: 0.9
     });
-  }
-
-  if (telemetryMode) {
-    telemetryMode.textContent = shook ? "SHAKE" : isOpen ? "OPEN" : "CLOSED";
   }
 
   return { isOpen, shook, centerPx };
@@ -325,10 +334,9 @@ const HAND_CONNECTIONS = [
 ];
 
 const LOST_RESET_FRAMES = 4;
-let lostHandFrames = 0;
 
 /**
- * 検出結果の平滑化・判定・描画を行う
+ * 検出結果の判定・描画を行う（左手・右手の両手同時演奏対応）
  * @param {object} results
  */
 function processDetectionResults(results) {
@@ -336,31 +344,62 @@ function processDetectionResults(results) {
 
   const nowMs = performance.now();
   const hands = results?.landmarks || [];
-
-  if (hands.length === 0) {
-    lostHandFrames++;
-    if (lostHandFrames >= LOST_RESET_FRAMES) {
-      resetMaracasState();
-    }
-    if (telemetryMode) telemetryMode.textContent = "IDLE";
-    renderRipples();
-    return;
-  }
-  lostHandFrames = 0;
-
-  const rawLm = hands[0];
+  const handednesses = results?.handednesses || [];
   const width = canvas.width;
   const height = canvas.height;
-  const pxLm = rawLm.map((pt) => ({
-    x: pt.x * width,
-    y: pt.y * height
-  }));
+  const seenKeys = new Set();
 
-  const { isOpen, centerPx } = evaluateMaracasShake(rawLm, pxLm, nowMs);
+  let anyShook = false;
+  let anyOpen = false;
 
-  if (showTrackingLines) {
-    drawHandSkeleton(pxLm, centerPx, isOpen);
+  for (let i = 0; i < hands.length; i++) {
+    const rawLm = hands[i];
+    if (!rawLm || rawLm.length < 21) continue;
+
+    // handedness が重複または未取得の場合は空いているスロットへ割り当て
+    let handKey = handednesses[i]?.[0]?.categoryName === "Left" ? "Left" : "Right";
+    if (seenKeys.has(handKey)) {
+      handKey = handKey === "Left" ? "Right" : "Left";
+    }
+    if (seenKeys.has(handKey)) continue;
+
+    seenKeys.add(handKey);
+    const handState = maracasHands[handKey];
+    handState.lostFrames = 0;
+
+    const pxLm = rawLm.map((pt) => ({
+      x: pt.x * width,
+      y: pt.y * height
+    }));
+
+    const { isOpen, shook, centerPx } = evaluateMaracasShake(handState, rawLm, pxLm, nowMs);
+    if (shook) anyShook = true;
+    if (isOpen) anyOpen = true;
+
+    if (showTrackingLines) {
+      drawHandSkeleton(pxLm, centerPx, isOpen);
+    }
   }
+
+  // 未検出だった手側の状態をロスト猶予後にリセット
+  for (const key of ["Left", "Right"]) {
+    if (!seenKeys.has(key)) {
+      const handState = maracasHands[key];
+      handState.lostFrames++;
+      if (handState.lostFrames >= LOST_RESET_FRAMES) {
+        resetMaracasHandState(handState);
+      }
+    }
+  }
+
+  if (telemetryMode) {
+    if (seenKeys.size === 0) {
+      telemetryMode.textContent = "IDLE";
+    } else {
+      telemetryMode.textContent = anyShook ? "SHAKE" : anyOpen ? "OPEN" : "CLOSED";
+    }
+  }
+
   renderRipples();
 }
 
@@ -405,11 +444,11 @@ function drawHandSkeleton(pts, centerPx, isOpen) {
  * シェイク発火時のモノクロ波紋アニメーションを描画
  */
 function renderRipples() {
-  if (maracasState.ripples.length === 0) return;
+  if (shakeRipples.length === 0) return;
 
   canvasCtx.save();
-  for (let i = maracasState.ripples.length - 1; i >= 0; i--) {
-    const r = maracasState.ripples[i];
+  for (let i = shakeRipples.length - 1; i >= 0; i--) {
+    const r = shakeRipples[i];
     canvasCtx.beginPath();
     canvasCtx.arc(r.x, r.y, r.radius, 0, Math.PI * 2);
     canvasCtx.strokeStyle = `rgba(255, 255, 255, ${r.alpha.toFixed(2)})`;
@@ -419,7 +458,7 @@ function renderRipples() {
     r.radius += (r.maxRadius - r.radius) * 0.25;
     r.alpha -= 0.08;
     if (r.alpha <= 0.02) {
-      maracasState.ripples.splice(i, 1);
+      shakeRipples.splice(i, 1);
     }
   }
   canvasCtx.restore();
@@ -498,7 +537,7 @@ async function ensureMicroEngine() {
     }
 
     microHandpose = await createHandpose({
-      maxHands: 1,
+      maxHands: 2,
       scoreThreshold: 0.45,
       palmScoreThreshold: 0.45
     });
@@ -530,7 +569,7 @@ async function ensureMediaPipeEngine() {
       handLandmarker = await HandLandmarker.createFromOptions(vision, {
         baseOptions: { modelAssetPath: modelPath, delegate: "GPU" },
         runningMode: "VIDEO",
-        numHands: 1,
+        numHands: 2,
         minHandDetectionConfidence: 0.4,
         minHandPresenceConfidence: 0.4,
         minTrackingConfidence: 0.3
@@ -543,7 +582,7 @@ async function ensureMediaPipeEngine() {
         handLandmarker = await HandLandmarker.createFromOptions(vision, {
           baseOptions: { modelAssetPath: modelPath, delegate: "CPU" },
           runningMode: "VIDEO",
-          numHands: 1,
+          numHands: 2,
           minHandDetectionConfidence: 0.4,
           minHandPresenceConfidence: 0.4,
           minTrackingConfidence: 0.3
@@ -578,7 +617,7 @@ async function switchTrackingEngine(targetPref = preferredEngine) {
           microHandpose.reset();
         }
         syncEngineToggleUI();
-        resetMaracasState();
+        resetAllMaracasStates();
         return;
       }
     }
@@ -590,7 +629,7 @@ async function switchTrackingEngine(targetPref = preferredEngine) {
     activeTrackingEngine = "MEDIAPIPE";
     preferredEngine = "MEDIAPIPE";
     syncEngineToggleUI();
-    resetMaracasState();
+    resetAllMaracasStates();
   } finally {
     isSwitchingEngine = false;
     if (engineToggleBtn) engineToggleBtn.disabled = false;
@@ -762,14 +801,13 @@ async function startCamera(deviceId = null, isManualSelect = false) {
 
   appFrameCount = 0;
   camFrameCount = 0;
-  lostHandFrames = 0;
   lastPresentedFrames = -1;
   lastAppProcessedTime = 0;
   isInferringFrame = false;
   pendingVideoFrameTime = null;
   lastAppFpsTime = performance.now();
   lastCamFpsTime = performance.now();
-  resetMaracasState();
+  resetAllMaracasStates();
   if (microHandpose && typeof microHandpose.reset === "function") {
     microHandpose.reset();
   }
@@ -831,7 +869,12 @@ async function processVideoFrame(frameTime) {
       microInputCtx.drawImage(video, 0, 0, inputCanvas.width, inputCanvas.height);
       const hands = await microHandpose.detect(inputCanvas);
       if (!isPredicting) return;
-      results = { landmarks: hands.map((h) => h.landmarks) };
+      results = {
+        landmarks: hands.map((h) => h.landmarks),
+        handednesses: hands.map((h) => [
+          { categoryName: h.handedness === "right" ? "Right" : "Left" }
+        ])
+      };
     } else if (handLandmarker) {
       results = handLandmarker.detectForVideo(video, timestampMs);
     }
@@ -986,6 +1029,12 @@ async function handleStartPlay() {
 }
 
 function initApp() {
+  // デバッグテレメトリは ?debug=1 指定時のみ表示（通常は非表示）
+  const isDebugMode = new URLSearchParams(window.location.search).get("debug") === "1";
+  if (telemetryPill) {
+    telemetryPill.classList.toggle("hidden", !isDebugMode);
+  }
+
   syncMirrorUI();
   syncEngineToggleUI();
   syncTrackingLineToggleUI();
