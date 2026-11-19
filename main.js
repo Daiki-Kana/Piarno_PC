@@ -29,7 +29,6 @@ const cameraSelectBtn = document.getElementById("camera-select-btn");
 const cameraSelectMenu = document.getElementById("camera-select-menu");
 const cameraListEl = document.getElementById("camera-list");
 const mirrorToggleBtn = document.getElementById("mirror-toggle-btn");
-const oneEuroToggleBtn = document.getElementById("one-euro-toggle-btn");
 const engineToggleBtn = document.getElementById("engine-toggle-btn");
 const trackingLineToggleBtn = document.getElementById("tracking-line-toggle-btn");
 
@@ -44,7 +43,6 @@ const cameraErrorCloseBtn = document.getElementById("camera-error-close-btn");
 // ==========================================================================
 const PC_CAMERA_STORAGE_KEY = "maracas_pc_camera_id";
 const PC_MIRROR_STORAGE_KEY = "maracas_pc_mirror";
-const PC_ONE_EURO_STORAGE_KEY = "maracas_pc_one_euro";
 const PC_ENGINE_PREF_STORAGE_KEY = "maracas_pc_engine_pref";
 const PC_TRACKING_LINE_STORAGE_KEY = "maracas_pc_tracking_line";
 
@@ -62,15 +60,6 @@ let currentCameraId = (() => {
 let isMirrorEnabled = (() => {
   try {
     const saved = localStorage.getItem(PC_MIRROR_STORAGE_KEY);
-    return saved === null ? true : saved === "true";
-  } catch {
-    return true;
-  }
-})();
-
-let isOneEuroEnabled = (() => {
-  try {
-    const saved = localStorage.getItem(PC_ONE_EURO_STORAGE_KEY);
     return saved === null ? true : saved === "true";
   } catch {
     return true;
@@ -180,88 +169,16 @@ function playMaracasSound(intensity = 0.7, isOpen = true) {
 }
 
 // ==========================================================================
-// 1 Euro Filter（平滑化 ＆ バイパス対応）
+// パー/グー判定 ＆ マラカス振り（縦：下方向への振り始め立ち上がり即時発音）検知
 // ==========================================================================
-class OneEuroFilter {
-  constructor(minCutoff = 1.6, beta = 0.02, dCutoff = 1.0) {
-    this.minCutoff = minCutoff;
-    this.beta = beta;
-    this.dCutoff = dCutoff;
-    this.xPrev = null;
-    this.dxPrev = 0;
-    this.tPrev = null;
-  }
-
-  alpha(cutoff, dt) {
-    const r = 2 * Math.PI * cutoff * dt;
-    return r / (r + 1);
-  }
-
-  reset(x = null, t = null) {
-    this.xPrev = x;
-    this.dxPrev = 0;
-    this.tPrev = t;
-  }
-
-  filter(x, t) {
-    if (this.tPrev === null || this.xPrev === null) {
-      this.xPrev = x;
-      this.tPrev = t;
-      this.dxPrev = 0;
-      return x;
-    }
-    const dt = Math.max((t - this.tPrev) / 1000, 1 / 240);
-    const dx = (x - this.xPrev) / dt;
-    const ad = this.alpha(this.dCutoff, dt);
-    const edx = ad * dx + (1 - ad) * this.dxPrev;
-    const cutoff = this.minCutoff + this.beta * Math.abs(edx);
-    const a = this.alpha(cutoff, dt);
-    const out = a * x + (1 - a) * this.xPrev;
-
-    this.xPrev = out;
-    this.dxPrev = edx;
-    this.tPrev = t;
-    return out;
-  }
-}
-
-class PointFilter {
-  constructor(minCutoff = 1.6, beta = 0.02) {
-    this.xf = new OneEuroFilter(minCutoff, beta);
-    this.yf = new OneEuroFilter(minCutoff, beta);
-  }
-
-  reset(x = null, y = null, t = null) {
-    this.xf.reset(x, t);
-    this.yf.reset(y, t);
-  }
-
-  filter(x, y, t, out, bypass = false) {
-    const fx = this.xf.filter(x, t);
-    const fy = this.yf.filter(y, t);
-    out.x = bypass ? x : fx;
-    out.y = bypass ? y : fy;
-    return out;
-  }
-}
-
-const ALL_JOINT_INDICES = Array.from({ length: 21 }, (_, i) => i);
-const landmarkFilters = ALL_JOINT_INDICES.map(() => new PointFilter(1.6, 0.02));
-const filteredLandmarks = ALL_JOINT_INDICES.map(() => ({ x: 0, y: 0 }));
-
-// ==========================================================================
-// パー/グー判定 ＆ マラカス振り（縦：下方向への勢いある振り＋急減速/折り返し）検知
-// ==========================================================================
-const SHAKE_ARM_SPEED_TH = 2.4;     // 下方向への振り開始とみなす正規化速度（palmSize / 秒）
-const SHAKE_MIN_DECEL_TH = 12.0;    // 振り切り減速発火に必要な最小減速加速度（palmSize / 秒^2）
+const SHAKE_TRIGGER_SPEED_TH = 2.6; // 即時発音とみなす下方向正規化速度（palmSize / 秒）
+const SHAKE_RESET_SPEED_TH = 0.8;   // 再トリガー許可のための速度低下閾値（palmSize / 秒）
 const SHAKE_COOLDOWN_MS = 200;      // 連続誤爆を防ぐ無検知時間（ms）
 
 const maracasState = {
   prevCenter: null,
   prevTimeMs: null,
-  prevDownSpeed: 0,
-  isArmed: false,
-  peakDownSpeed: 0,
+  canTrigger: true,
   lastHitTimeMs: 0,
   ripples: []
 };
@@ -272,9 +189,7 @@ const maracasState = {
 function resetMaracasState() {
   maracasState.prevCenter = null;
   maracasState.prevTimeMs = null;
-  maracasState.prevDownSpeed = 0;
-  maracasState.isArmed = false;
-  maracasState.peakDownSpeed = 0;
+  maracasState.canTrigger = true;
 }
 
 /**
@@ -338,42 +253,29 @@ function evaluateMaracasShake(lm, pxLm, nowMs) {
   maracasState.prevCenter = centerNorm;
   maracasState.prevTimeMs = nowMs;
 
-  const isInCooldown = nowMs - maracasState.lastHitTimeMs < SHAKE_COOLDOWN_MS;
-  if (!isInCooldown && downSpeed >= SHAKE_ARM_SPEED_TH) {
-    maracasState.isArmed = true;
-    if (downSpeed > maracasState.peakDownSpeed) {
-      maracasState.peakDownSpeed = downSpeed;
-    }
+  if (!maracasState.canTrigger && downSpeed < SHAKE_RESET_SPEED_TH) {
+    maracasState.canTrigger = true;
   }
 
   let shook = false;
-  if (maracasState.isArmed) {
-    // 縦に勢い良く振り下ろした直後の折り返し（上方向へ反転）または急減速で発音
-    const isReversal = downSpeed < 0;
-    const decel = (maracasState.prevDownSpeed - downSpeed) / dt;
-    const isSharpStop =
-      downSpeed < maracasState.peakDownSpeed * 0.4 && decel >= SHAKE_MIN_DECEL_TH;
+  const isInCooldown = nowMs - maracasState.lastHitTimeMs < SHAKE_COOLDOWN_MS;
+  // 振り始めの加速立ち上がりで即座に発音し、振り終わり待ち遅延をゼロにする
+  if (maracasState.canTrigger && !isInCooldown && downSpeed >= SHAKE_TRIGGER_SPEED_TH) {
+    const intensity = Math.min(1.0, Math.max(0.35, (downSpeed - 2.0) / 5.5));
+    playMaracasSound(intensity, isOpen);
+    maracasState.canTrigger = false;
+    maracasState.lastHitTimeMs = nowMs;
+    shook = true;
 
-    if ((isReversal || isSharpStop) && nowMs - maracasState.lastHitTimeMs >= SHAKE_COOLDOWN_MS) {
-      const intensity = Math.min(1.0, Math.max(0.35, (maracasState.peakDownSpeed - 1.8) / 5.5));
-      playMaracasSound(intensity, isOpen);
-      maracasState.lastHitTimeMs = nowMs;
-      maracasState.isArmed = false;
-      maracasState.peakDownSpeed = 0;
-      shook = true;
-
-      // 波紋ビジュアルエフェクトを追加
-      maracasState.ripples.push({
-        x: centerPx.x,
-        y: centerPx.y,
-        radius: 14,
-        maxRadius: 56 + intensity * 44,
-        alpha: 0.9
-      });
-    }
+    // 波紋ビジュアルエフェクトを追加
+    maracasState.ripples.push({
+      x: centerPx.x,
+      y: centerPx.y,
+      radius: 14,
+      maxRadius: 56 + intensity * 44,
+      alpha: 0.9
+    });
   }
-
-  maracasState.prevDownSpeed = downSpeed;
 
   if (telemetryMode) {
     telemetryMode.textContent = shook ? "SHAKE" : isOpen ? "OPEN" : "CLOSED";
@@ -409,10 +311,8 @@ function processDetectionResults(results) {
 
   if (hands.length === 0) {
     lostHandFrames++;
-    // 瞬間的なロスト（4フレーム未満）ではフィルタと振り状態を維持し、復帰時のカクつきを防止
     if (lostHandFrames >= LOST_RESET_FRAMES) {
       resetMaracasState();
-      landmarkFilters.forEach((f) => f.reset());
     }
     if (telemetryMode) telemetryMode.textContent = "IDLE";
     renderRipples();
@@ -423,28 +323,15 @@ function processDetectionResults(results) {
   const rawLm = hands[0];
   const width = canvas.width;
   const height = canvas.height;
-
-  // ピクセル座標へ変換し、1 Euro Filter（またはバイパス）を適用
-  for (const i of ALL_JOINT_INDICES) {
-    landmarkFilters[i].filter(
-      rawLm[i].x * width,
-      rawLm[i].y * height,
-      nowMs,
-      filteredLandmarks[i],
-      !isOneEuroEnabled
-    );
-  }
-
-  // 正規化座標へ戻してマラカス判定（フィルタ状態がそのまま反映される）
-  const evalLm = filteredLandmarks.map((pt) => ({
-    x: pt.x / width,
-    y: pt.y / height
+  const pxLm = rawLm.map((pt) => ({
+    x: pt.x * width,
+    y: pt.y * height
   }));
 
-  const { isOpen, centerPx } = evaluateMaracasShake(evalLm, filteredLandmarks, nowMs);
+  const { isOpen, centerPx } = evaluateMaracasShake(rawLm, pxLm, nowMs);
 
   if (showTrackingLines) {
-    drawHandSkeleton(filteredLandmarks, centerPx, isOpen);
+    drawHandSkeleton(pxLm, centerPx, isOpen);
   }
   renderRipples();
 }
@@ -664,7 +551,6 @@ async function switchTrackingEngine(targetPref = preferredEngine) {
         }
         syncEngineToggleUI();
         resetMaracasState();
-        landmarkFilters.forEach((f) => f.reset());
         return;
       }
     }
@@ -677,7 +563,6 @@ async function switchTrackingEngine(targetPref = preferredEngine) {
     preferredEngine = "MEDIAPIPE";
     syncEngineToggleUI();
     resetMaracasState();
-    landmarkFilters.forEach((f) => f.reset());
   } finally {
     isSwitchingEngine = false;
     if (engineToggleBtn) engineToggleBtn.disabled = false;
@@ -1023,13 +908,6 @@ function syncMirrorUI() {
   }
 }
 
-function syncOneEuroToggleUI() {
-  if (!oneEuroToggleBtn) return;
-  oneEuroToggleBtn.classList.toggle("off", !isOneEuroEnabled);
-  oneEuroToggleBtn.setAttribute("aria-pressed", String(isOneEuroEnabled));
-  oneEuroToggleBtn.title = isOneEuroEnabled ? "1 Euro Filter: ON" : "1 Euro Filter: OFF";
-}
-
 function syncEngineToggleUI() {
   const isMicro = activeTrackingEngine === "MICRO_HANDPOSE";
   const label = isMicro ? "MICRO" : activeTrackingEngine === "MEDIAPIPE" ? mediaPipeDelegateLabel : preferredEngine;
@@ -1081,7 +959,6 @@ async function handleStartPlay() {
 
 function initApp() {
   syncMirrorUI();
-  syncOneEuroToggleUI();
   syncEngineToggleUI();
   syncTrackingLineToggleUI();
 
@@ -1117,17 +994,6 @@ function initApp() {
         localStorage.setItem(PC_MIRROR_STORAGE_KEY, String(isMirrorEnabled));
       } catch {}
       syncMirrorUI();
-    });
-  }
-
-  if (oneEuroToggleBtn) {
-    oneEuroToggleBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      isOneEuroEnabled = !isOneEuroEnabled;
-      try {
-        localStorage.setItem(PC_ONE_EURO_STORAGE_KEY, String(isOneEuroEnabled));
-      } catch {}
-      syncOneEuroToggleUI();
     });
   }
 
