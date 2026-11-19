@@ -45,32 +45,8 @@
           </div>
         </div>
 
-        <!-- 鏡像（左右反転）切替 -->
-        <button id="mirror-toggle-btn" class="ctrl-circle-btn" aria-label="Toggle Mirror" title="Mirror: ON" aria-pressed="true">
-          <svg viewBox="0 0 24 24" class="btn-icon" aria-hidden="true">
-            <line x1="12" y1="4" x2="12" y2="20" class="icon-line" />
-            <polygon points="4,8 9,12 4,16" class="icon-line" />
-            <polygon points="20,8 15,12 20,16" class="icon-line" />
-          </svg>
-        </button>
-
-        <!-- トラッキングエンジン切替（MediaPipe ⇔ MicroPose） -->
-        <button id="engine-toggle-btn" class="ctrl-circle-btn off" aria-label="Switch Tracking Engine" title="Engine: MP-GPU" aria-pressed="false">
-          <svg viewBox="0 0 24 24" class="btn-icon" aria-hidden="true">
-            <rect x="7" y="7" width="10" height="10" rx="2" class="icon-line" />
-            <line x1="9" y1="3" x2="9" y2="7" class="icon-line" />
-            <line x1="15" y1="3" x2="15" y2="7" class="icon-line" />
-            <line x1="9" y1="17" x2="9" y2="21" class="icon-line" />
-            <line x1="15" y1="17" x2="15" y2="21" class="icon-line" />
-            <line x1="3" y1="9" x2="7" y2="9" class="icon-line" />
-            <line x1="3" y1="15" x2="7" y2="15" class="icon-line" />
-            <line x1="17" y1="9" x2="21" y2="9" class="icon-line" />
-            <line x1="17" y1="15" x2="21" y2="15" class="icon-line" />
-          </svg>
-        </button>
-
         <!-- トラッキングライン表示切替 -->
-        <button id="tracking-line-toggle-btn" class="ctrl-circle-btn toggle-slash-btn" aria-label="Toggle Tracking Lines" title="Tracking Lines: ON" aria-pressed="true">
+        <button id="tracking-line-toggle-btn" class="ctrl-circle-btn toggle-slash-btn off" aria-label="Toggle Tracking Lines" title="Tracking Lines: OFF" aria-pressed="false">
           <svg viewBox="0 0 24 24" class="btn-icon" aria-hidden="true">
             <path class="icon-line" d="M 4,19 L 10,13 L 14,16 L 20,5" />
             <circle cx="4" cy="19" r="2" class="icon-dot" />

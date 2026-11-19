@@ -29,8 +29,6 @@ const telemetryEngine = document.getElementById("telemetry-engine");
 const cameraSelectBtn = document.getElementById("camera-select-btn");
 const cameraSelectMenu = document.getElementById("camera-select-menu");
 const cameraListEl = document.getElementById("camera-list");
-const mirrorToggleBtn = document.getElementById("mirror-toggle-btn");
-const engineToggleBtn = document.getElementById("engine-toggle-btn");
 const trackingLineToggleBtn = document.getElementById("tracking-line-toggle-btn");
 
 const cameraErrorOverlay = document.getElementById("camera-error-overlay");
@@ -43,8 +41,6 @@ const cameraErrorCloseBtn = document.getElementById("camera-error-close-btn");
 // 設定・永続化状態
 // ==========================================================================
 const PC_CAMERA_STORAGE_KEY = "maracas_pc_camera_id";
-const PC_MIRROR_STORAGE_KEY = "maracas_pc_mirror";
-const PC_ENGINE_PREF_STORAGE_KEY = "maracas_pc_engine_pref";
 const PC_TRACKING_LINE_STORAGE_KEY = "maracas_pc_tracking_line";
 
 const MAX_APP_FPS = 60;
@@ -58,30 +54,14 @@ let currentCameraId = (() => {
   }
 })();
 
-let isMirrorEnabled = (() => {
-  try {
-    const saved = localStorage.getItem(PC_MIRROR_STORAGE_KEY);
-    return saved === null ? true : saved === "true";
-  } catch {
-    return true;
-  }
-})();
-
-let preferredEngine = (() => {
-  try {
-    const saved = localStorage.getItem(PC_ENGINE_PREF_STORAGE_KEY);
-    return saved === "MICRO" ? "MICRO" : "MEDIAPIPE";
-  } catch {
-    return "MEDIAPIPE";
-  }
-})();
+let preferredEngine = "MEDIAPIPE";
 
 let showTrackingLines = (() => {
   try {
     const saved = localStorage.getItem(PC_TRACKING_LINE_STORAGE_KEY);
-    return saved === null ? true : saved === "true";
+    return saved === null ? false : saved === "true";
   } catch {
-    return true;
+    return false;
   }
 })();
 
@@ -228,9 +208,9 @@ function playMaracasSound(intensity = 0.7, isUpHit = false) {
 // ==========================================================================
 // グー専用 マラカス振り（下振り専用）検知
 // ==========================================================================
-const SHAKE_DOWN_SPEED_TH = 2.6;       // 下振り発音の下方向正規化速度（palmSize / 秒）
+const SHAKE_DOWN_SPEED_TH = 2.8;       // 下振り発音の下方向正規化速度（palmSize / 秒）
 const SHAKE_RESET_SPEED_TH = 0.8;      // 再トリガー許可のための速度低下閾値（palmSize / 秒）
-const SHAKE_MIN_DOWN_STROKE = 0.12;    // 下振り最小移動距離（palmSize比）
+const SHAKE_MIN_DOWN_STROKE = 0.40;    // 下振り最小移動距離（palmSize比：ある程度大きく振ってから発音）
 const SHAKE_MIN_PALM_SCALE_RATIO = 0.97;// カメラから遠ざかる後ろ引きを弾くサイズ維持率
 const SHAKE_COOLDOWN_MS = 200;         // 連続誤爆を防ぐ無検知時間（ms）
 
@@ -246,6 +226,66 @@ const createMaracasHandState = () => ({
 
 const maracasSlots = [createMaracasHandState(), createMaracasHandState()];
 const shakeRipples = [];
+const shakeParticles = [];
+const MAX_SHAKE_PARTICLES = 64;
+
+/**
+ * 発音時の軽量エフェクト（二重衝撃波リング＋フラッシュ＋放射スパーク）を生成
+ */
+function spawnShakeEffects(x, y, intensity) {
+  // 1. 中心フラッシュ
+  shakeRipples.push({
+    type: "flash",
+    x,
+    y,
+    radius: 18 + intensity * 14,
+    alpha: 0.9
+  });
+
+  // 2. 二重衝撃波リング（メイン白＋外側シアン）
+  shakeRipples.push({
+    type: "ring",
+    x,
+    y,
+    radius: 14,
+    maxRadius: 68 + intensity * 52,
+    lineWidth: 3.2,
+    color: "255, 255, 255",
+    alpha: 0.95,
+    decay: 0.065
+  });
+  shakeRipples.push({
+    type: "ring",
+    x,
+    y,
+    radius: 8,
+    maxRadius: 92 + intensity * 64,
+    lineWidth: 1.8,
+    color: "0, 229, 255",
+    alpha: 0.78,
+    decay: 0.05
+  });
+
+  // 3. 放射状スパークパーティクル（負荷を抑えるため上限キャップ付き）
+  const count = Math.round(10 + intensity * 4);
+  for (let i = 0; i < count; i++) {
+    if (shakeParticles.length >= MAX_SHAKE_PARTICLES) {
+      shakeParticles.shift();
+    }
+    const angle = (Math.PI * 2 * i) / count + (Math.random() - 0.5) * 0.35;
+    const speed = 3.2 + Math.random() * (4.5 + intensity * 3.0);
+    shakeParticles.push({
+      x,
+      y,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed,
+      size: 2.0 + Math.random() * 2.2,
+      isAccent: i % 3 === 0,
+      alpha: 0.95,
+      decay: 0.045 + Math.random() * 0.025
+    });
+  }
+}
 
 /**
  * 指定した手スロットのマラカス検知状態をリセット
@@ -371,14 +411,8 @@ function evaluateMaracasShake(handState, lm, pxLm, nowMs) {
     handState.lastHitTimeMs = nowMs;
     shook = true;
 
-    // 波紋ビジュアルエフェクトを追加
-    shakeRipples.push({
-      x: centerPx.x,
-      y: centerPx.y,
-      radius: 14,
-      maxRadius: 56 + intensity * 44,
-      alpha: 0.9
-    });
+    // 軽量エフェクト（二重リング＋フラッシュ＋放射スパーク）を発火
+    spawnShakeEffects(centerPx.x, centerPx.y, intensity);
   }
 
   return { isOpen, shook, centerPx };
@@ -542,23 +576,56 @@ function drawHandSkeleton(pts, centerPx, isOpen) {
  * シェイク発火時のモノクロ波紋アニメーションを描画
  */
 function renderRipples() {
-  if (shakeRipples.length === 0) return;
+  if (shakeRipples.length === 0 && shakeParticles.length === 0) return;
 
   canvasCtx.save();
+
+  // リング・フラッシュ描画
   for (let i = shakeRipples.length - 1; i >= 0; i--) {
     const r = shakeRipples[i];
-    canvasCtx.beginPath();
-    canvasCtx.arc(r.x, r.y, r.radius, 0, Math.PI * 2);
-    canvasCtx.strokeStyle = `rgba(255, 255, 255, ${r.alpha.toFixed(2)})`;
-    canvasCtx.lineWidth = 2.5;
-    canvasCtx.stroke();
+    if (r.type === "flash") {
+      canvasCtx.beginPath();
+      canvasCtx.arc(r.x, r.y, r.radius, 0, Math.PI * 2);
+      canvasCtx.fillStyle = `rgba(255, 255, 255, ${(r.alpha * 0.45).toFixed(2)})`;
+      canvasCtx.fill();
+      r.radius *= 1.08;
+      r.alpha -= 0.16;
+    } else {
+      canvasCtx.beginPath();
+      canvasCtx.arc(r.x, r.y, r.radius, 0, Math.PI * 2);
+      canvasCtx.strokeStyle = `rgba(${r.color}, ${r.alpha.toFixed(2)})`;
+      canvasCtx.lineWidth = r.lineWidth;
+      canvasCtx.stroke();
+      r.radius += (r.maxRadius - r.radius) * 0.22;
+      r.alpha -= r.decay;
+    }
 
-    r.radius += (r.maxRadius - r.radius) * 0.25;
-    r.alpha -= 0.08;
     if (r.alpha <= 0.02) {
       shakeRipples.splice(i, 1);
     }
   }
+
+  // スパークパーティクル描画
+  for (let i = shakeParticles.length - 1; i >= 0; i--) {
+    const p = shakeParticles[i];
+    canvasCtx.beginPath();
+    canvasCtx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+    canvasCtx.fillStyle = p.isAccent
+      ? `rgba(0, 229, 255, ${p.alpha.toFixed(2)})`
+      : `rgba(255, 255, 255, ${p.alpha.toFixed(2)})`;
+    canvasCtx.fill();
+
+    p.x += p.vx;
+    p.y += p.vy;
+    p.vx *= 0.94;
+    p.vy = p.vy * 0.94 + 0.12;
+    p.alpha -= p.decay;
+
+    if (p.alpha <= 0.02) {
+      shakeParticles.splice(i, 1);
+    }
+  }
+
   canvasCtx.restore();
 }
 
@@ -703,7 +770,6 @@ async function ensureMediaPipeEngine() {
 async function switchTrackingEngine(targetPref = preferredEngine) {
   if (isSwitchingEngine) return;
   isSwitchingEngine = true;
-  if (engineToggleBtn) engineToggleBtn.disabled = true;
 
   try {
     if (targetPref === "MICRO") {
@@ -730,7 +796,6 @@ async function switchTrackingEngine(targetPref = preferredEngine) {
     resetAllMaracasStates();
   } finally {
     isSwitchingEngine = false;
-    if (engineToggleBtn) engineToggleBtn.disabled = false;
   }
 }
 
@@ -1067,26 +1132,11 @@ function updateAppFps() {
 // ==========================================================================
 // UIコントロール・起動フロー
 // ==========================================================================
-function syncMirrorUI() {
-  if (video) video.classList.toggle("mirrored", isMirrorEnabled);
-  if (canvas) canvas.classList.toggle("mirrored", isMirrorEnabled);
-  if (mirrorToggleBtn) {
-    mirrorToggleBtn.classList.toggle("off", !isMirrorEnabled);
-    mirrorToggleBtn.setAttribute("aria-pressed", String(isMirrorEnabled));
-    mirrorToggleBtn.title = isMirrorEnabled ? "Mirror: ON" : "Mirror: OFF";
-  }
-}
-
 function syncEngineToggleUI() {
   const isMicro = activeTrackingEngine === "MICRO_HANDPOSE";
   const label = isMicro ? "MICRO" : activeTrackingEngine === "MEDIAPIPE" ? mediaPipeDelegateLabel : preferredEngine;
   if (telemetryEngine) {
     telemetryEngine.textContent = label;
-  }
-  if (engineToggleBtn) {
-    engineToggleBtn.classList.toggle("off", !isMicro);
-    engineToggleBtn.setAttribute("aria-pressed", String(isMicro));
-    engineToggleBtn.title = `Engine: ${label}`;
   }
 }
 
@@ -1133,7 +1183,6 @@ function initApp() {
     telemetryPill.classList.toggle("hidden", !isDebugMode);
   }
 
-  syncMirrorUI();
   syncEngineToggleUI();
   syncTrackingLineToggleUI();
 
@@ -1158,28 +1207,6 @@ function initApp() {
       if (!cameraSelectMenu.classList.contains("hidden") && !cameraSelectMenu.contains(e.target)) {
         cameraSelectMenu.classList.add("hidden");
       }
-    });
-  }
-
-  if (mirrorToggleBtn) {
-    mirrorToggleBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      isMirrorEnabled = !isMirrorEnabled;
-      try {
-        localStorage.setItem(PC_MIRROR_STORAGE_KEY, String(isMirrorEnabled));
-      } catch {}
-      syncMirrorUI();
-    });
-  }
-
-  if (engineToggleBtn) {
-    engineToggleBtn.addEventListener("click", async (e) => {
-      e.stopPropagation();
-      const nextPref = activeTrackingEngine === "MICRO_HANDPOSE" ? "MEDIAPIPE" : "MICRO";
-      try {
-        localStorage.setItem(PC_ENGINE_PREF_STORAGE_KEY, nextPref);
-      } catch {}
-      await switchTrackingEngine(nextPref);
     });
   }
 
