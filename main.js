@@ -88,34 +88,42 @@ let showTrackingLines = (() => {
 // ==========================================================================
 // Web Audio API マラカス音響エンジン
 // ==========================================================================
-// WebAudioFont 実機マラカスサンプル ＆ Web Audio フォールバック音響エンジン
+// WebAudioFont 実機パーカッション（グー: マラカス / パー: タンバリン）エンジン
 // ==========================================================================
 const MARACAS_PRESET_URL =
   "https://surikov.github.io/webaudiofontdata/sound/12870_0_FluidR3_GM_sf2_file.js";
 const MARACAS_PRESET_VAR = "_drum_70_0_FluidR3_GM_sf2_file";
+const TAMBOURINE_PRESET_URL =
+  "https://surikov.github.io/webaudiofontdata/sound/12854_0_FluidR3_GM_sf2_file.js";
+const TAMBOURINE_PRESET_VAR = "_drum_54_0_FluidR3_GM_sf2_file";
 
 let audioCtx = null;
 let noiseBuffer = null;
-let maracasStrokeIndex = 0;
 let wafPlayer = null;
 let maracasPreset = null;
-let maracasClosedFilter = null;
+let tambourinePreset = null;
 let isPresetLoading = false;
 
 /**
- * WebAudioFont の Maracas (GM Drum Note 70) プリセットを非同期ロード
+ * WebAudioFont の Maracas (Note 70) と Tambourine (Note 54) を非同期ロード
  */
-function loadMaracasPreset(ctx) {
-  if (maracasPreset || isPresetLoading || !wafPlayer) return;
+function loadSoundPresets(ctx) {
+  if ((maracasPreset && tambourinePreset) || isPresetLoading || !wafPlayer) return;
   isPresetLoading = true;
   try {
     wafPlayer.loader.startLoad(ctx, MARACAS_PRESET_URL, MARACAS_PRESET_VAR);
+    wafPlayer.loader.startLoad(ctx, TAMBOURINE_PRESET_URL, TAMBOURINE_PRESET_VAR);
     wafPlayer.loader.waitLoad(() => {
-      const loaded = window[MARACAS_PRESET_VAR];
-      if (loaded) {
-        maracasPreset = loaded;
-        console.log("[AUDIO] WebAudioFont Maracas サンプルのロードが完了しました");
+      if (window[MARACAS_PRESET_VAR]) {
+        maracasPreset = window[MARACAS_PRESET_VAR];
       }
+      if (window[TAMBOURINE_PRESET_VAR]) {
+        tambourinePreset = window[TAMBOURINE_PRESET_VAR];
+      }
+      console.log("[AUDIO] WebAudioFont サンプルロード完了:", {
+        maracas: Boolean(maracasPreset),
+        tambourine: Boolean(tambourinePreset)
+      });
       isPresetLoading = false;
     });
   } catch (err) {
@@ -139,14 +147,10 @@ function ensureAudioContext() {
   }
   if (audioCtx && !wafPlayer && typeof window.WebAudioFontPlayer === "function") {
     wafPlayer = new window.WebAudioFontPlayer();
-    maracasClosedFilter = audioCtx.createBiquadFilter();
-    maracasClosedFilter.type = "lowpass";
-    maracasClosedFilter.frequency.setValueAtTime(2600, audioCtx.currentTime);
-    maracasClosedFilter.connect(audioCtx.destination);
-    loadMaracasPreset(audioCtx);
+    loadSoundPresets(audioCtx);
   }
   if (audioCtx && !noiseBuffer) {
-    // サンプルロード前用の0.25秒ホワイトノイズバッファを事前生成
+    // サンプルロード前・シャカシャカ粒レイヤー用の0.25秒ホワイトノイズバッファを事前生成
     const length = Math.floor(audioCtx.sampleRate * 0.25);
     noiseBuffer = audioCtx.createBuffer(1, length, audioCtx.sampleRate);
     const data = noiseBuffer.getChannelData(0);
@@ -169,24 +173,20 @@ function playShakerGrainLayer(ctx, clamped, isOpen, delaySec = 0, gainScale = 0.
 
   const hpFilter = ctx.createBiquadFilter();
   hpFilter.type = "highpass";
-  hpFilter.frequency.setValueAtTime(
-    isOpen ? 4600 + clamped * 1000 : 1400 + clamped * 500,
-    startAt
-  );
+  hpFilter.frequency.setValueAtTime(4400 + clamped * 1000, startAt);
 
   const bpFilter = ctx.createBiquadFilter();
   bpFilter.type = "bandpass";
   bpFilter.frequency.setValueAtTime(
-    isOpen ? 6800 + clamped * 1400 : 2500 + clamped * 700,
+    isOpen ? 7600 + clamped * 1400 : 6600 + clamped * 1200,
     startAt
   );
-  bpFilter.Q.setValueAtTime(isOpen ? 1.1 : 1.4, startAt);
+  bpFilter.Q.setValueAtTime(1.15, startAt);
 
   const gainNode = ctx.createGain();
   const peakGain = gainScale * (0.45 + clamped * 0.55);
-  const decaySec = (isOpen ? 0.065 : 0.085) + clamped * 0.04;
+  const decaySec = 0.065 + clamped * 0.04;
 
-  // 10msのスウェルで「シュワッ」と粒が擦れる立ち上がりを作る
   gainNode.gain.setValueAtTime(0.001, startAt);
   gainNode.gain.linearRampToValueAtTime(peakGain, startAt + 0.01);
   gainNode.gain.exponentialRampToValueAtTime(0.0001, startAt + decaySec);
@@ -200,7 +200,7 @@ function playShakerGrainLayer(ctx, clamped, isOpen, delaySec = 0, gainScale = 0.
 }
 
 /**
- * ロード前・オフライン時のフォールバック合成マラカス音
+ * ロード前・オフライン時のフォールバック合成音
  */
 function playMaracasSynthFallback(ctx, clamped, isOpen) {
   playShakerGrainLayer(ctx, clamped, isOpen, 0, 0.75);
@@ -208,29 +208,34 @@ function playMaracasSynthFallback(ctx, clamped, isOpen) {
 }
 
 /**
- * マラカス音を発音する（WebAudioFont実機サンプル＋粒跳ね返り＋高域シャカ感）
+ * 手の開閉に応じて楽器音を発音する
+ * - グー（isOpen=false）: 通常のマラカス音（Note 70＋シャカシャカ粒レイヤー）
+ * - パー（isOpen=true）: タンバリン音（Note 54）
  * @param {number} intensity 振りの強さ (0.25〜1.0)
- * @param {boolean} isOpen パー（true: 高い音） / グー（false: 低めの音）
+ * @param {boolean} isOpen パー（true） / グー（false）
  */
 function playMaracasSound(intensity = 0.7, isOpen = true) {
   const ctx = ensureAudioContext();
   if (!ctx) return;
 
   const clamped = Math.min(1.0, Math.max(0.2, intensity));
+  const volume = Math.min(1.0, 0.45 + clamped * 0.55);
+  const now = ctx.currentTime;
 
-  if (maracasPreset && wafPlayer) {
+  if (wafPlayer) {
     try {
-      const now = ctx.currentTime;
-      const basePitch = isOpen ? 75 : 64;
-      const targetNode = isOpen || !maracasClosedFilter ? ctx.destination : maracasClosedFilter;
-      const volume = Math.min(1.0, 0.45 + clamped * 0.55);
-
-      // 1打目（主音）＋ 24ms後の2打目（粒の跳ね返り）でシャカシャカ感を演出
-      wafPlayer.queueWaveTable(ctx, targetNode, maracasPreset, now, basePitch, 0.35, volume);
-      wafPlayer.queueWaveTable(ctx, targetNode, maracasPreset, now + 0.024, basePitch + 2, 0.25, volume * 0.45);
-      // 粒の擦れる高域シャリ感を薄くブレンド
-      playShakerGrainLayer(ctx, clamped, isOpen, 0, isOpen ? 0.34 : 0.24);
-      return;
+      if (isOpen && tambourinePreset) {
+        // パー：タンバリン（Note 54）
+        wafPlayer.queueWaveTable(ctx, ctx.destination, tambourinePreset, now, 54, 0.45, volume);
+        return;
+      }
+      if (!isOpen && maracasPreset) {
+        // グー：通常のマラカス（Note 70＋24ms跳ね返り＋高域シャカ感）
+        wafPlayer.queueWaveTable(ctx, ctx.destination, maracasPreset, now, 70, 0.35, volume);
+        wafPlayer.queueWaveTable(ctx, ctx.destination, maracasPreset, now + 0.024, 72, 0.25, volume * 0.45);
+        playShakerGrainLayer(ctx, clamped, false, 0, 0.34);
+        return;
+      }
     } catch (err) {
       console.warn("[AUDIO] WebAudioFont 再生エラー、フォールバック使用:", err);
     }
@@ -247,13 +252,19 @@ const SHAKE_RESET_SPEED_TH = 0.8;       // 再トリガー許可のための速�
 const SHAKE_MIN_STROKE_DIST = 0.12;     // 誤爆防止の最小下移動距離（palmSize比）
 const SHAKE_MIN_PALM_SCALE_RATIO = 0.97;// カメラから遠ざかる後ろ引きを弾くサイズ維持率
 const SHAKE_COOLDOWN_MS = 200;          // 連続誤爆を防ぐ無検知時間（ms）
+const TAMBOURINE_LR_SPEED_TH = 2.6;     // パー時の左右振り（ナイナイ）発音速度閾値（palmSize / 秒）
+const TAMBOURINE_LR_RESET_TH = 0.9;     // パー左右振りの再トリガー速度低下閾値
+const TAMBOURINE_LR_COOLDOWN_MS = 140;  // ナイナイ往復リズム用の最小発音間隔（ms）
 
 const createMaracasHandState = () => ({
   prevCenter: null,
+  prevTipX: null,
   prevTimeMs: null,
   prevPalmSize: null,
   downStrokeDist: 0,
   canTrigger: true,
+  canTriggerLR: true,
+  prevVxDir: 0,
   lastHitTimeMs: 0,
   lostFrames: 0
 });
@@ -266,10 +277,13 @@ const shakeRipples = [];
  */
 function resetMaracasHandState(handState) {
   handState.prevCenter = null;
+  handState.prevTipX = null;
   handState.prevTimeMs = null;
   handState.prevPalmSize = null;
   handState.downStrokeDist = 0;
   handState.canTrigger = true;
+  handState.canTriggerLR = true;
+  handState.prevVxDir = 0;
 }
 
 function resetAllMaracasStates() {
@@ -328,6 +342,7 @@ function evaluateMaracasShake(handState, lm, pxLm, nowMs) {
 
   if (handState.prevCenter === null || handState.prevTimeMs === null) {
     handState.prevCenter = centerNorm;
+    handState.prevTipX = lm[12].x;
     handState.prevTimeMs = nowMs;
     handState.prevPalmSize = palmSize;
     return { isOpen, shook: false, centerPx };
@@ -337,6 +352,12 @@ function evaluateMaracasShake(handState, lm, pxLm, nowMs) {
   const deltaDownNorm = (centerNorm.y - handState.prevCenter.y) / palmSize;
   // Y軸下方向（上から下への振り下ろし）の正規化速度を算出
   const downSpeed = deltaDownNorm / dt;
+
+  // パー時の「ナイナイ（左右振り）」用に、中指先(12)と手のひら中心の水平速度を算出
+  const avgXDelta = ((lm[12].x - (handState.prevTipX ?? lm[12].x)) + (centerNorm.x - handState.prevCenter.x)) * 0.5;
+  const lrVx = avgXDelta / (palmSize * dt);
+  const absLrVx = Math.abs(lrVx);
+  const lrDir = lrVx > 0.3 ? 1 : lrVx < -0.3 ? -1 : 0;
 
   // 下向きに連続移動した距離を累積し、上向きに戻ったらリセット
   if (deltaDownNorm > 0) {
@@ -351,27 +372,43 @@ function evaluateMaracasShake(handState, lm, pxLm, nowMs) {
     palmSize >= handState.prevPalmSize * SHAKE_MIN_PALM_SCALE_RATIO;
 
   handState.prevCenter = centerNorm;
+  handState.prevTipX = lm[12].x;
   handState.prevTimeMs = nowMs;
   handState.prevPalmSize = palmSize;
 
   if (!handState.canTrigger && downSpeed < SHAKE_RESET_SPEED_TH) {
     handState.canTrigger = true;
   }
+  if (!handState.canTriggerLR && (absLrVx < TAMBOURINE_LR_RESET_TH || (lrDir !== 0 && lrDir !== handState.prevVxDir))) {
+    handState.canTriggerLR = true;
+  }
 
   let shook = false;
-  const isInCooldown = nowMs - handState.lastHitTimeMs < SHAKE_COOLDOWN_MS;
-  // 振り始めの加速立ち上がり（サイズ維持＋最小ストローク長達成時）で即座に発音
-  if (
+  const isVerticalHit =
     handState.canTrigger &&
-    !isInCooldown &&
+    nowMs - handState.lastHitTimeMs >= SHAKE_COOLDOWN_MS &&
     isNotRetreating &&
     handState.downStrokeDist >= SHAKE_MIN_STROKE_DIST &&
-    downSpeed >= SHAKE_TRIGGER_SPEED_TH
-  ) {
-    const intensity = Math.min(1.0, Math.max(0.35, (downSpeed - 2.0) / 5.5));
+    downSpeed >= SHAKE_TRIGGER_SPEED_TH;
+
+  const isHorizontalTambourineHit =
+    isOpen &&
+    handState.canTriggerLR &&
+    nowMs - handState.lastHitTimeMs >= TAMBOURINE_LR_COOLDOWN_MS &&
+    absLrVx >= TAMBOURINE_LR_SPEED_TH;
+
+  if (isVerticalHit || isHorizontalTambourineHit) {
+    const triggerSpeed = isVerticalHit ? downSpeed : absLrVx;
+    const intensity = Math.min(1.0, Math.max(0.35, (triggerSpeed - 2.0) / 5.5));
     playMaracasSound(intensity, isOpen);
-    handState.canTrigger = false;
-    handState.downStrokeDist = 0;
+    if (isVerticalHit) {
+      handState.canTrigger = false;
+      handState.downStrokeDist = 0;
+    }
+    if (isHorizontalTambourineHit) {
+      handState.canTriggerLR = false;
+      handState.prevVxDir = lrDir;
+    }
     handState.lastHitTimeMs = nowMs;
     shook = true;
 
