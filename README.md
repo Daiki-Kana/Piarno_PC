@@ -1,38 +1,35 @@
-# Piarno PC
+# Maracas Web App
 
-PC接続の60fps対応Webカメラを前提とした、ブラウザ完結型のエアピアノ（Hand Landmarker + Tone.js）です。
+MediaPipe Hand Landmarker（および MicroPose WebGPU 切替対応）と Web Audio API による、ブラウザ完結型のエアマラカス Web アプリです。
 
 ## 主な特徴
 
-- **60fps Webカメラ対応**: `1280×720 @ 60fps` を優先してキャプチャし、`requestVideoFrameCallback` でフレーム同期推論を実行
-- **カメラデバイス選択**: 接続中のWebカメラ一覧から使用カメラを切り替え可能（選択状態を保持）
-- **鏡像（Mirror）切替**: 映像・トラッキング描画の左右反転をワンクリックで切り替え可能
-- **打鍵検知モード切替**: 従来の1D位置・速度ベース判定（`LEGACY`）を標準とし、検証用に `BLANCH` / `HYBRID` へリアルタイム切替可能
-- **60fpsテレメトリ表示**: 左上のピルで実測FPS・解像度・推論時間・判定モードを常時確認可能
+- **パー / グーによる2音色打ち分け**:
+  - **パー（開いた手）**: 高域中心の明るいシェイカー音
+  - **グー（閉じた手）**: 低〜中域中心の太く低めの音
+- **外方向振り検知**: 勢い良く外（小指側）へ振った直後の減速・折り返しを検知して発音
+- **トラッキングエンジン切替**: MediaPipe（`MP-GPU`）を標準とし、WebGPU 環境では `MICRO`（`@svenflow/micro-handpose`）へのリアルタイム切替も可能
+- **ローカル開発用 HTTPS + QR 表示**: `npm run dev` 起動時にスマホ等からアクセスできる `https://` URL の QR コードを表示
 
-## ディレクトリ構成
-
-```
-Piarno_PC/
-├── index.html          # メインUI（ビデオ/Canvas重畳、テレメトリ、各種アイコンコントロール）
-├── main.js             # Webカメラ制御・MediaPipe推論・1D打鍵判定・Tone.js音響合成
-├── style.css           # 白黒ミニマル＆ボーダーレスUIスタイル
-├── blanchDetector.js   # BlanchTouch（爪先ROI色変化）検出モジュール
-├── vite.config.js      # Vite開発サーバー＆静的ビルド設定
-└── public/
-    └── models/         # MediaPipe HandLandmarker モデルアセット
-```
-
-## 起動方法
+## 起動方法（ローカル開発）
 
 ```bash
 npm install
 npm run dev
 ```
 
-本番用静的ビルド（GitHub Pages / Cloudflare Pages / Vercel 等でそのまま公開可能）：
+## Cloudflare Pages での公開方法
+
+静的ホスティング（クライアントサイド完結）としてそのまま公開できます。
+
+- **ビルドコマンド**: `npm run build`
+- **ビルド出力ディレクトリ**: `dist`
+- **デプロイブランチ**: `maracas`（または公開対象ブランチ）
+- **ヘッダ設定**: `public/_headers` が自動的に `dist/_headers` へ出力され、`Permissions-Policy: camera=(self)` 等が適用されます
+
+ローカルでビルド結果を確認する場合：
 
 ```bash
 npm run build
+npm run preview
 ```
-
